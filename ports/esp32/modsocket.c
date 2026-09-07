@@ -48,6 +48,7 @@
 #include "py/mperrno.h"
 #include "shared/netutils/netutils.h"
 #include "modnetwork.h"
+#include "modsocket.h"
 
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -74,6 +75,7 @@ enum {
 
 typedef struct _socket_obj_t {
     mp_obj_base_t base;
+    const socket_backend_t *backend;
     int fd;
     uint8_t domain;
     uint8_t type;
@@ -87,6 +89,36 @@ typedef struct _socket_obj_t {
 } socket_obj_t;
 
 static const char *TAG = "modsocket";
+
+static int socket_backend_lwip_join_multicast_group(int s, const uint8_t *mreq) {
+    (void)s;
+    // POSIX setsockopt has order: group addr, if addr, lwIP has it vice-versa
+    err_t err = igmp_joingroup((const ip4_addr_t *)mreq + 1, (const ip4_addr_t *)mreq);
+    if (err != ERR_OK) {
+        errno = -err;
+        return -1;
+    }
+    return 0;
+}
+
+// lwIP, the backend of the WLAN, LAN and PPP interfaces.  Every entry is
+// lwIP's own socket call, except multicast membership which goes through
+// lwIP's IGMP API rather than setsockopt().
+const socket_backend_t socket_backend_lwip = {
+    .socket = lwip_socket,
+    .close = lwip_close,
+    .bind = lwip_bind,
+    .listen = lwip_listen,
+    .accept = lwip_accept,
+    .connect = lwip_connect,
+    .setsockopt = lwip_setsockopt,
+    .getsockopt = lwip_getsockopt,
+    .fcntl = lwip_fcntl,
+    .write = lwip_write,
+    .recvfrom = lwip_recvfrom,
+    .sendto = lwip_sendto,
+    .join_multicast_group = socket_backend_lwip_join_multicast_group,
+};
 
 void _socket_settimeout(socket_obj_t *sock, uint64_t timeout_ms);
 
@@ -278,6 +310,7 @@ static mp_obj_t socket_make_new(const mp_obj_type_t *type_in, size_t n_args, siz
     mp_arg_check_num(n_args, n_kw, 0, 3, false);
 
     socket_obj_t *sock = mp_obj_malloc_with_finaliser(socket_obj_t, type_in);
+    sock->backend = &socket_backend_lwip;
     sock->domain = AF_INET;
     sock->type = SOCK_STREAM;
     sock->proto = 0;
@@ -293,13 +326,13 @@ static mp_obj_t socket_make_new(const mp_obj_type_t *type_in, size_t n_args, siz
 
     sock->state = sock->type == SOCK_STREAM ? SOCKET_STATE_NEW : SOCKET_STATE_CONNECTED;
 
-    sock->fd = lwip_socket(sock->domain, sock->type, sock->proto);
+    sock->fd = sock->backend->socket(sock->domain, sock->type, sock->proto);
     if (sock->fd < 0 && errno == ENFILE) {
         // ESP32 LWIP has a hard socket limit, ENFILE is returned when this is
         // reached. Similar to the logic elsewhere for MemoryError, try running
         // GC before failing outright.
         gc_collect();
-        sock->fd = lwip_socket(sock->domain, sock->type, sock->proto);
+        sock->fd = sock->backend->socket(sock->domain, sock->type, sock->proto);
     }
     if (sock->fd < 0) {
         mp_raise_OSError(errno);
@@ -314,7 +347,7 @@ static mp_obj_t socket_bind(const mp_obj_t arg0, const mp_obj_t arg1) {
     struct addrinfo *res;
     _socket_getaddrinfo(arg1, &res);
     self->state = SOCKET_STATE_CONNECTED;
-    int r = lwip_bind(self->fd, res->ai_addr, res->ai_addrlen);
+    int r = self->backend->bind(self->fd, res->ai_addr, res->ai_addrlen);
     lwip_freeaddrinfo(res);
     if (r < 0) {
         mp_raise_OSError(errno);
@@ -334,7 +367,7 @@ static mp_obj_t socket_listen(size_t n_args, const mp_obj_t *args) {
     }
 
     self->state = SOCKET_STATE_CONNECTED;
-    int r = lwip_listen(self->fd, backlog);
+    int r = self->backend->listen(self->fd, backlog);
     if (r < 0) {
         mp_raise_OSError(errno);
     }
@@ -351,7 +384,7 @@ static mp_obj_t socket_accept(const mp_obj_t arg0) {
     int new_fd = -1;
     for (int i = 0; i <= self->retries; i++) {
         MP_THREAD_GIL_EXIT();
-        new_fd = lwip_accept(self->fd, &addr, &addr_len);
+        new_fd = self->backend->accept(self->fd, &addr, &addr_len);
         MP_THREAD_GIL_ENTER();
         if (new_fd >= 0) {
             break;
@@ -371,6 +404,7 @@ static mp_obj_t socket_accept(const mp_obj_t arg0) {
 
     // create new socket object
     socket_obj_t *sock = mp_obj_malloc_with_finaliser(socket_obj_t, self->base.type);
+    sock->backend = self->backend;
     sock->fd = new_fd;
     sock->domain = self->domain;
     sock->type = self->type;
@@ -400,7 +434,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
     MP_THREAD_GIL_EXIT();
     self->state = SOCKET_STATE_CONNECTED;
 
-    flags = fcntl(self->fd, F_GETFL);
+    flags = self->backend->fcntl(self->fd, F_GETFL, 0);
 
     blocking = (flags & O_NONBLOCK) == 0;
 
@@ -414,7 +448,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
         //
         // - Allows emulating a connect timeout, which is not supported by LWIP or
         //   required by POSIX but is normal behaviour for CPython.
-        if (fcntl(self->fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        if (self->backend->fcntl(self->fd, F_SETFL, flags | O_NONBLOCK) < 0) {
             ESP_LOGE(TAG, "fcntl set failed %d", errno); // Unexpected internal failure
             raise_err = errno;
         }
@@ -422,7 +456,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
 
     if (raise_err == 0) {
         // Try performing the actual connect. Expected to always return immediately.
-        int r = lwip_connect(self->fd, res->ai_addr, res->ai_addrlen);
+        int r = self->backend->connect(self->fd, res->ai_addr, res->ai_addrlen);
         if (r != 0) {
             raise_err = errno;
         }
@@ -430,7 +464,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
 
     if (blocking) {
         // Set the socket back to blocking. We can still pass it to select() in this state.
-        int r = fcntl(self->fd, F_SETFL, flags);
+        int r = self->backend->fcntl(self->fd, F_SETFL, flags);
         if (r != 0 && (raise_err == 0 || raise_err == EINPROGRESS)) {
             ESP_LOGE(TAG, "fcntl restore failed %d", errno); // Unexpected internal failure
             raise_err = errno;
@@ -462,7 +496,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
             } else if (r > 0) {
                 // Select indicated the socket is writable. Check for any error.
                 socklen_t socklen = sizeof(raise_err);
-                r = getsockopt(self->fd, SOL_SOCKET, SO_ERROR, &raise_err, &socklen);
+                r = self->backend->getsockopt(self->fd, SOL_SOCKET, SO_ERROR, &raise_err, &socklen);
                 if (r < 0) {
                     raise_err = errno;
                 }
@@ -497,7 +531,7 @@ static mp_obj_t socket_setsockopt(size_t n_args, const mp_obj_t *args) {
         case SO_REUSEADDR:
         case SO_BROADCAST: {
             int val = mp_obj_get_int(args[3]);
-            int ret = lwip_setsockopt(self->fd, SOL_SOCKET, opt, &val, sizeof(int));
+            int ret = self->backend->setsockopt(self->fd, SOL_SOCKET, opt, &val, sizeof(int));
             if (ret != 0) {
                 mp_raise_OSError(errno);
             }
@@ -509,7 +543,7 @@ static mp_obj_t socket_setsockopt(size_t n_args, const mp_obj_t *args) {
             const char *val = mp_obj_str_get_data(args[3], &len);
             char ifname[NETIF_NAMESIZE] = {0};
             memcpy(&ifname, val, len);
-            int ret = lwip_setsockopt(self->fd, SOL_SOCKET, opt, &ifname, NETIF_NAMESIZE);
+            int ret = self->backend->setsockopt(self->fd, SOL_SOCKET, opt, &ifname, NETIF_NAMESIZE);
             if (ret != 0) {
                 mp_raise_OSError(errno);
             }
@@ -538,7 +572,7 @@ static mp_obj_t socket_setsockopt(size_t n_args, const mp_obj_t *args) {
         // level: IPPROTO_TCP
         case TCP_NODELAY: {
             int val = mp_obj_get_int(args[3]);
-            int ret = lwip_setsockopt(self->fd, IPPROTO_TCP, opt, &val, sizeof(int));
+            int ret = self->backend->setsockopt(self->fd, IPPROTO_TCP, opt, &val, sizeof(int));
             if (ret != 0) {
                 mp_raise_OSError(errno);
             }
@@ -553,10 +587,9 @@ static mp_obj_t socket_setsockopt(size_t n_args, const mp_obj_t *args) {
                 mp_raise_ValueError(NULL);
             }
 
-            // POSIX setsockopt has order: group addr, if addr, lwIP has it vice-versa
-            err_t err = igmp_joingroup((const ip4_addr_t *)bufinfo.buf + 1, bufinfo.buf);
-            if (err != ERR_OK) {
-                mp_raise_OSError(-err);
+            int ret = self->backend->join_multicast_group(self->fd, bufinfo.buf);
+            if (ret != 0) {
+                mp_raise_OSError(errno);
             }
             break;
         }
@@ -580,9 +613,9 @@ void _socket_settimeout(socket_obj_t *sock, uint64_t timeout_ms) {
         .tv_sec = 0,
         .tv_usec = timeout_ms ? SOCKET_POLL_US : 0
     };
-    lwip_setsockopt(sock->fd, SOL_SOCKET, SO_SNDTIMEO, (const void *)&timeout, sizeof(timeout));
-    lwip_setsockopt(sock->fd, SOL_SOCKET, SO_RCVTIMEO, (const void *)&timeout, sizeof(timeout));
-    lwip_fcntl(sock->fd, F_SETFL, timeout_ms ? 0 : O_NONBLOCK);
+    sock->backend->setsockopt(sock->fd, SOL_SOCKET, SO_SNDTIMEO, (const void *)&timeout, sizeof(timeout));
+    sock->backend->setsockopt(sock->fd, SOL_SOCKET, SO_RCVTIMEO, (const void *)&timeout, sizeof(timeout));
+    sock->backend->fcntl(sock->fd, F_SETFL, timeout_ms ? 0 : O_NONBLOCK);
 }
 
 static mp_obj_t socket_settimeout(const mp_obj_t arg0, const mp_obj_t arg1) {
@@ -648,7 +681,7 @@ static mp_uint_t _socket_read_data(mp_obj_t self_in, void *buf, size_t size, mp_
         if (release_gil) {
             MP_THREAD_GIL_EXIT();
         }
-        int r = lwip_recvfrom(sock->fd, buf, size, flags, from, from_len);
+        int r = sock->backend->recvfrom(sock->fd, buf, size, flags, from, from_len);
         if (release_gil) {
             MP_THREAD_GIL_ENTER();
         }
@@ -712,7 +745,7 @@ int _socket_send(socket_obj_t *sock, const char *data, size_t datalen) {
     int sentlen = 0;
     for (int i = 0; i <= sock->retries && sentlen < datalen; i++) {
         MP_THREAD_GIL_EXIT();
-        int r = lwip_write(sock->fd, data + sentlen, datalen - sentlen);
+        int r = sock->backend->write(sock->fd, data + sentlen, datalen - sentlen);
         MP_THREAD_GIL_ENTER();
         // lwip returns EINPROGRESS when trying to send right after a non-blocking connect
         if (r < 0 && errno != EWOULDBLOCK && errno != EINPROGRESS) {
@@ -768,7 +801,7 @@ static mp_obj_t socket_sendto(mp_obj_t self_in, mp_obj_t data_in, mp_obj_t addr_
     // send the data
     for (int i = 0; i <= self->retries; i++) {
         MP_THREAD_GIL_EXIT();
-        int ret = lwip_sendto(self->fd, bufinfo.buf, bufinfo.len, 0, (struct sockaddr *)&to, sizeof(to));
+        int ret = self->backend->sendto(self->fd, bufinfo.buf, bufinfo.len, 0, (struct sockaddr *)&to, sizeof(to));
         MP_THREAD_GIL_ENTER();
         if (ret > 0) {
             return mp_obj_new_int_from_uint(ret);
@@ -802,7 +835,7 @@ static mp_uint_t socket_stream_write(mp_obj_t self_in, const void *buf, mp_uint_
     socket_obj_t *sock = self_in;
     for (int i = 0; i <= sock->retries; i++) {
         MP_THREAD_GIL_EXIT();
-        int r = lwip_write(sock->fd, buf, size);
+        int r = sock->backend->write(sock->fd, buf, size);
         MP_THREAD_GIL_ENTER();
         if (r > 0) {
             return r;
@@ -873,7 +906,7 @@ static mp_uint_t socket_stream_ioctl(mp_obj_t self_in, mp_uint_t request, uintpt
                 socket->events_callback = MP_OBJ_NULL;
             }
             #endif
-            int ret = lwip_close(socket->fd);
+            int ret = socket->backend->close(socket->fd);
             if (ret != 0) {
                 *errcode = errno;
                 return MP_STREAM_ERROR;
