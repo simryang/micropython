@@ -80,10 +80,16 @@ toe_dhcp_result_t toe_dhcp_acquire(uint32_t timeout_ms,
         return TOE_DHCP_NO_SOCKET;
     }
 
-    uint32_t waited_ms = 0;
+    // Wall-clock deadline, not an iteration count: toe_yield_1ms() is
+    // vTaskDelay(pdMS_TO_TICKS(1)), which at CONFIG_FREERTOS_HZ=100 is
+    // vTaskDelay(0) -- a bare yield of microseconds.  Counting iterations as
+    // milliseconds made this "15 s" window about 1.65 s (measured: every
+    // failure at 1,652 ms), shorter than ioLibrary's first retransmit at
+    // DHCP_WAIT_TIME = 10 s, so one late or lost packet failed the lease.
+    uint32_t t0 = toe_time_us();
     toe_dhcp_result_t result = TOE_DHCP_TIMEOUT;
 
-    while (waited_ms < timeout_ms) {
+    while ((toe_time_us() - t0) < timeout_ms * 1000u) {
         uint8_t st = DHCP_run();
         if (st == DHCP_IP_LEASED || st == DHCP_IP_ASSIGN || st == DHCP_IP_CHANGED) {
             getIPfromDHCP(ip);
@@ -98,7 +104,6 @@ toe_dhcp_result_t toe_dhcp_acquire(uint32_t timeout_ms,
             break;
         }
         toe_yield_1ms();
-        waited_ms++;
     }
 
     if (result != TOE_DHCP_OK) {
