@@ -145,8 +145,24 @@ list(APPEND MICROPY_SOURCE_PORT
     machine_rtc.c
     machine_sdcard.c
     modespnow.c
+
+    # wiznet_toe: vendored ioLibrary_Driver core for W5500 TOE (hardware TCP offload).
+    wiznet_toe/Ethernet/socket.c
+    wiznet_toe/Ethernet/wizchip_conf.c
+    wiznet_toe/Ethernet/W5500/w5500.c
+    # Step 2: SPI/GPIO bring-up glue + selftest module.
+    wiznet_toe/toe_spi_port.c
+    # Step 3: static IP bring-up (wizchip_init/setnetinfo + shadow esp_netif).
+    wiznet_toe/toe_net_bringup.c
+    wiznet_toe/modwiznettoe.c
 )
 list(TRANSFORM MICROPY_SOURCE_PORT PREPEND ${MICROPY_PORT_DIR}/)
+
+# wiznet_toe's close=wiz_close rename and the step-4 socket wrap are
+# registered further down, after idf_component_register()/MICROPY_TARGET
+# exist -- set_source_files_properties() errors as "not scriptable" if called
+# during ESP-IDF's early component-requirements discovery pass, which runs
+# this file's early portion before any target exists.
 list(APPEND MICROPY_SOURCE_PORT ${CMAKE_BINARY_DIR}/pins.c)
 
 list(APPEND MICROPY_SOURCE_QSTR
@@ -286,6 +302,118 @@ target_compile_options(usermod INTERFACE ${idf_compile_options})
 target_include_directories(${MICROPY_TARGET} PUBLIC
     ${IDF_PATH}/components/bt/host/nimble/nimble
 )
+
+# wiznet_toe: ioLibrary_Driver headers include each other with bare relative
+# paths (e.g. W5500/w5500.h includes "wizchip_conf.h"), so the Ethernet/ dir
+# itself must be on the include path. _WIZCHIP_=5500 selects the W5500 branch
+# in wizchip_conf.h at compile time (step 1: build verification only).
+target_include_directories(${MICROPY_TARGET} PUBLIC
+    ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet
+    # DHCP/DNS sources include each other's headers by bare name too.
+    ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP
+    ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS
+)
+target_compile_definitions(${MICROPY_TARGET} PUBLIC
+    _WIZCHIP_=5500
+)
+
+# wiznet_toe: ioLibrary's Ethernet/socket.c defines a global close(uint8_t)
+# that would hijack newlib's POSIX close() and break the VFS -> lwip_close
+# path the moment it's actually reachable (see the
+# MICROPY_WIZNET_TOE_SOCKET_WRAP block below -- with -Wl,--gc-sections this
+# symbol is otherwise dropped as dead code, which is why steps 1-3 linked
+# cleanly without this rename). Rename close -> wiz_close CONSISTENTLY across
+# every TU that calls ioLibrary's close() (they call each other's close), so
+# ioLibrary stays internally consistent while POSIX close() is left to
+# newlib/VFS. Applied unconditionally (harmless when unreachable). Ported
+# from wsm_driver's CMakeLists.txt.
+set_source_files_properties(
+    ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/socket.c
+    ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/wizchip_conf.c
+    ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/W5500/w5500.c
+    PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
+)
+
+# Step 4: socket-layer wrap (wsm_driver's wiznet_toe.c + wiztoe_wrap.c,
+# vendored verbatim). OFF by default: -Wl,--wrap=lwip_* is a GLOBAL linker
+# rewrite that routes every socket() call in the WHOLE FIRMWARE (WiFi
+# included) to the W5500 TOE hardware sockets. wsm_driver's own design
+# assumes TOE owns every socket in the build; that's wrong for a MicroPython
+# firmware that also wants WiFi/MACRAW sockets to keep working. Build a
+# dedicated TOE-testing firmware with
+# `idf.py -D MICROPY_WIZNET_TOE_SOCKET_WRAP=ON build` to turn this on.
+# TODO(step 4+): runtime fd-range dispatch (fall through to __real_lwip_* for
+# non-TOE fds) so one firmware can support both at once -- see
+# D:\esp32s3-lab\docs\ARCHITECTURE_TOE.md.
+option(MICROPY_WIZNET_TOE_SOCKET_WRAP
+    "Route lwIP BSD sockets to WIZnet TOE hardware sockets. Exclusive with WiFi/MACRAW sockets in the same binary."
+    OFF)
+
+if(MICROPY_WIZNET_TOE_SOCKET_WRAP)
+    target_sources(${MICROPY_TARGET} PRIVATE
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_port.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_vfs.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/wiznet_toe.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/wiztoe_wrap.c
+        # Step 5: network.WIZNET_TOE Python face.
+        ${MICROPY_PORT_DIR}/wiznet_toe/network_wiznet_toe.c
+        # Step 6: DHCP client (ioLibrary DHCP_run on a reserved hw socket).
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP/dhcp.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dhcp.c
+        # Step 7: DNS resolver behind a wrapped getaddrinfo().
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS/dns.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dns.c
+    )
+    # network_wiznet_toe.c defines MP_QSTR_WIZNET_TOE etc, so it must be in
+    # the qstr scan set or those names never get generated.
+    list(APPEND MICROPY_SOURCE_QSTR
+        ${MICROPY_PORT_DIR}/wiznet_toe/network_wiznet_toe.c
+    )
+    set_source_files_properties(
+        ${MICROPY_PORT_DIR}/wiznet_toe/wiznet_toe.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dhcp.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dns.c
+        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
+    )
+    # The vendored ioLibrary DHCP/DNS sources trip ESP-IDF's promoted
+    # diagnostics (-Werror=format etc). A plain -Wno-error does not undo an
+    # explicit -Werror=foo, so silence them wholesale like wsm_driver does --
+    # and keep the close=wiz_close rename consistent with the rest of
+    # ioLibrary, since dhcp.c calls socket.c's close().
+    set_source_files_properties(
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP/dhcp.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS/dns.c
+        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close" COMPILE_OPTIONS "-w"
+    )
+    target_compile_definitions(${MICROPY_TARGET} PUBLIC
+        MICROPY_WIZNET_TOE_SOCKET_WRAP=1
+    )
+    target_link_options(${MICROPY_TARGET} PUBLIC
+        -Wl,--undefined=__wrap_lwip_socket
+        -Wl,--wrap=lwip_socket
+        -Wl,--wrap=lwip_bind
+        -Wl,--wrap=lwip_listen
+        -Wl,--wrap=lwip_accept
+        -Wl,--wrap=lwip_connect
+        -Wl,--wrap=lwip_send
+        -Wl,--wrap=lwip_recv
+        -Wl,--wrap=lwip_recvfrom
+        -Wl,--wrap=lwip_sendto
+        # MicroPython's modsocket.c sends via lwip_write() and adjusts blocking
+        # via lwip_fcntl(); wsm_driver's original list had neither.
+        -Wl,--wrap=lwip_write
+        -Wl,--wrap=lwip_read
+        -Wl,--wrap=lwip_fcntl
+        -Wl,--wrap=lwip_close
+        -Wl,--wrap=lwip_getsockname
+        -Wl,--wrap=lwip_setsockopt
+        -Wl,--wrap=lwip_getsockopt
+        # Step 7: socket.getaddrinfo() reaches lwip_getaddrinfo() directly, so
+        # without these the DNS query goes to lwIP (no route on TOE) and fails.
+        -Wl,--wrap=lwip_getaddrinfo
+        -Wl,--wrap=lwip_freeaddrinfo
+    )
+endif()
 
 # Add additional extmod and usermod components.
 if (MICROPY_PY_BTREE)

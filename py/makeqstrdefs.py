@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import multiprocessing, multiprocessing.dummy
 
 
@@ -58,9 +59,22 @@ def preprocess():
         pass
 
     def pp(flags):
+        # Write flags (which can be very long -- one -I per ESP-IDF component)
+        # to a GCC response file, so each per-chunk subprocess call stays
+        # under Windows' CreateProcess argv length limit.
+        # GCC's own @file parser treats bare " and \ as quoting metacharacters
+        # (like a simple shell), so flags containing them (e.g.
+        # -DMBEDTLS_CONFIG_FILE="mbedtls/esp_config.h") must be quoted and
+        # escaped, not written verbatim, or the quotes get silently stripped.
+        flags_rsp = tempfile.NamedTemporaryFile(mode="w", suffix=".rsp", delete=False)
+        for flag in flags:
+            escaped = flag.replace("\\", "\\\\").replace('"', '\\"')
+            flags_rsp.write('"' + escaped + '"\n')
+        flags_rsp.close()
+
         def run(files):
             try:
-                return subprocess.check_output(args.pp + flags + files)
+                return subprocess.check_output(args.pp + ["@" + flags_rsp.name] + files)
             except subprocess.CalledProcessError as er:
                 raise PreprocessorError(str(er))
 
@@ -170,6 +184,19 @@ def cat_together():
 
 
 if __name__ == "__main__":
+    # Expand @file response-file arguments. Needed on Windows, where the full
+    # cflags/sources argument list for "pp" mode can exceed cmd.exe's ~8191
+    # character command-line limit. One flag per line (not whitespace-split)
+    # since flags like -DMICROPY_HW_BOARD_NAME="foo bar" contain spaces.
+    expanded_argv = [sys.argv[0]]
+    for arg in sys.argv[1:]:
+        if arg.startswith("@"):
+            with open(arg[1:]) as f:
+                expanded_argv.extend(line for line in f.read().splitlines() if line)
+        else:
+            expanded_argv.append(arg)
+    sys.argv = expanded_argv
+
     if len(sys.argv) < 6:
         print("usage: %s command mode input_filename output_dir output_file" % sys.argv[0])
         sys.exit(2)
