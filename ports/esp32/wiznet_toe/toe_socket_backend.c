@@ -7,6 +7,13 @@
  * backend was the default arrive here, so a descriptor that is not ours is a
  * caller bug and gets EBADF.
  *
+ * Listeners are the one place the chip's model and BSD's differ: the chip has
+ * no backlog, the listening hardware socket itself becomes the connection it
+ * accepts.  toe_backend_accept() papers over that so a program sees the usual
+ * shape -- accept() returns a new descriptor for the connection and the
+ * listener keeps its own, moved onto a fresh hardware socket (or dormant until
+ * one is free; see toe_vfs.h).
+ *
  * Adapted from wiztoe_wrap.c, which reached the same code through
  * -Wl,--wrap=lwip_* and therefore had to dispatch on the descriptor and fall
  * back to lwIP for anything that was not ours.
@@ -19,6 +26,7 @@
 
 #include "lwip/sockets.h" // struct sockaddr_in, lwip_htons/htonl
 
+#include "toe_port.h"     // toe_yield_1ms(), toe_time_us()
 #include "toe_socket_backend.h"
 #include "toe_vfs.h"
 #include "wiznet_toe.h"
@@ -45,13 +53,34 @@ static void toe_ip_from_sockaddr(const struct sockaddr *name, uint8_t ip[4], uin
     *port = lwip_ntohs(sin->sin_port);
 }
 
-// Descriptor -> hardware socket number, or -1 with errno set.
+// Descriptor -> hardware socket number, or -1 with errno set: EBADF for a
+// descriptor that is not ours, ENOTCONN for a dormant listener (it has no
+// hardware socket right now; only accept(), select(), close() and the
+// blocking-mode/timeout options mean anything on it).
 static int toe_sn(int s) {
     int sn = toe_vfs_sn_from_fd(s);
     if (sn < 0) {
-        errno = EBADF;
+        errno = toe_vfs_is_dormant_listener(s) ? ENOTCONN : EBADF;
     }
     return sn;
+}
+
+// SO_RCVTIMEO/SO_SNDTIMEO carry a struct timeval; the driver keeps milliseconds.
+static int toe_timeval_to_ms(const void *optval, socklen_t optlen, uint32_t *ms) {
+    if (optlen < (socklen_t)sizeof(struct timeval)) {
+        errno = EINVAL;
+        return -1;
+    }
+    const struct timeval *tv = (const struct timeval *)optval;
+    *ms = (uint32_t)((tv->tv_sec * 1000) + (tv->tv_usec / 1000));
+    return 0;
+}
+
+static void toe_ms_to_timeval(uint32_t ms, void *optval, socklen_t *optlen) {
+    struct timeval *tv = (struct timeval *)optval;
+    tv->tv_sec = (long)(ms / 1000);
+    tv->tv_usec = (long)((ms % 1000) * 1000);
+    *optlen = sizeof(struct timeval);
 }
 
 static int toe_backend_socket(int domain, int type, int protocol) {
@@ -70,25 +99,16 @@ static int toe_backend_socket(int domain, int type, int protocol) {
 }
 
 static int toe_backend_close(int s) {
-    int sn = toe_sn(s);
-    if (sn < 0) {
+    if (!toe_vfs_owns_fd(s)) {
+        errno = EBADF;
         return -1;
     }
-    // Closing an accepted connection re-arms the listener on the same hardware
-    // socket and the same descriptor, so the descriptor must stay registered:
-    // close the hardware socket directly and keep the VFS entry.
-    if (wiztoe_is_rearming_listener(sn)) {
-        if (wiztoe_close(sn) < 0) {
-            errno = EBADF;
-            return -1;
-        }
-        return 0;
-    }
-    // Otherwise go through the close() syscall: our descriptors are registered
-    // with permanent=false and a local fd, and only esp_vfs_close() frees such
-    // an entry (esp_vfs_unregister_fd does not; it leaked one entry per socket
+    // Go through the close() syscall: our descriptors are registered with
+    // permanent=false and a local fd, and only esp_vfs_close() frees such an
+    // entry (esp_vfs_unregister_fd does not; it leaked one entry per socket
     // and exhausted the table after ~50 sockets).  close() also runs our VFS
-    // .close op, which releases the hardware socket.
+    // .close op, which releases the hardware socket (if the descriptor has
+    // one: a dormant listener does not).
     return close(s);
 }
 
@@ -118,10 +138,53 @@ static int toe_backend_listen(int s, int backlog) {
     return 0;
 }
 
+// A dormant listener needs a hardware socket back before it can accept.  In
+// blocking mode wait for one up to SO_RCVTIMEO -- MicroPython slices a
+// settimeout() into 100 ms SO_RCVTIMEO calls and retries, so returning at once
+// would make settimeout(10) expire immediately; in non-blocking mode do not
+// wait.  Returns the hardware socket number, or -1 when none came free.
+static int toe_wait_for_dormant_listener(int s) {
+    const wiztoe_socket_settings_t *settings = toe_vfs_dormant_listener_settings(s);
+    uint32_t t0 = toe_time_us();
+    for (;;) {
+        int sn = toe_vfs_wake_dormant_listener(s);
+        if (sn >= 0) {
+            return sn;
+        }
+        if (settings->nonblock) {
+            return -1;
+        }
+        if (settings->rcv_timeout_ms && (toe_time_us() - t0) >= settings->rcv_timeout_ms * 1000u) {
+            return -1;
+        }
+        toe_yield_1ms();
+    }
+}
+
+// The chip turns the listening hardware socket itself into the connection it
+// accepts (there is no backlog).  To keep BSD's shape -- accept() returns a new
+// descriptor, the listener stays usable -- the connection gets a fresh
+// descriptor for that hardware socket, and the listener's descriptor is moved
+// onto a new hardware socket listening with the same settings.  When every
+// hardware socket is taken the listener goes dormant instead and the next
+// accept()/select() on it retries, typically after the program has closed a
+// connection.
+//
+// Between the accept and the new listener opening (a few SPI transactions)
+// the port has no listening socket and a SYN arriving then is refused; the
+// old model had the same gap at close(), and a much longer one.
 static int toe_backend_accept(int s, struct sockaddr *addr, socklen_t *addrlen) {
-    int sn = toe_sn(s);
+    int sn = toe_vfs_sn_from_fd(s);
     if (sn < 0) {
-        return -1;
+        if (!toe_vfs_is_dormant_listener(s)) {
+            errno = EBADF;
+            return -1;
+        }
+        sn = toe_wait_for_dormant_listener(s);
+        if (sn < 0) {
+            errno = EWOULDBLOCK;
+            return -1;
+        }
     }
     int acc = wiztoe_accept(sn);
     if (acc == WIZTOE_ERR_TIMEOUT) {
@@ -132,19 +195,23 @@ static int toe_backend_accept(int s, struct sockaddr *addr, socklen_t *addrlen) 
         errno = EINVAL;
         return -1;
     }
-    uint8_t ip[4];
-    uint16_t port;
-    wiztoe_peer(acc, ip, &port);
-    toe_fill_sockaddr(addr, addrlen, ip, port);
-    // The chip turns the listening socket itself into the connection, so the
-    // accepted socket is the same hardware socket and keeps the same
-    // descriptor.
-    int acc_fd = (acc == sn) ? s : toe_vfs_alloc_fd(acc);
-    if (acc_fd < 0) {
+    // acc == sn: the listener's hardware socket is the connection now.  Move
+    // the listener first, so the connection's socket is free to be mapped.
+    wiztoe_socket_settings_t settings;
+    wiztoe_get_settings(sn, &settings);
+    toe_vfs_relisten(s, &settings);
+    int conn_fd = toe_vfs_alloc_fd(sn);
+    if (conn_fd < 0) {
+        // No descriptor to hand the connection out on: drop it.
+        wiztoe_close(sn);
         errno = ENFILE;
         return -1;
     }
-    return acc_fd;
+    uint8_t ip[4];
+    uint16_t port;
+    wiztoe_peer(sn, ip, &port);
+    toe_fill_sockaddr(addr, addrlen, ip, port);
+    return conn_fd;
 }
 
 static int toe_backend_connect(int s, const struct sockaddr *name, socklen_t namelen) {
@@ -164,12 +231,27 @@ static int toe_backend_connect(int s, const struct sockaddr *name, socklen_t nam
 }
 
 static int toe_backend_setsockopt(int s, int level, int optname, const void *optval, socklen_t optlen) {
-    int sn = toe_sn(s);
-    if (sn < 0) {
-        return -1;
-    }
     if (optval == NULL) {
         errno = EFAULT;
+        return -1;
+    }
+    wiztoe_socket_settings_t *dormant = toe_vfs_dormant_listener_settings(s);
+    if (dormant != NULL && level == SOL_SOCKET && (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)) {
+        // Remembered for the listener's next hardware socket (settimeout() on
+        // a dormant listener lands here); other options need a live socket.
+        uint32_t ms;
+        if (toe_timeval_to_ms(optval, optlen, &ms) < 0) {
+            return -1;
+        }
+        if (optname == SO_RCVTIMEO) {
+            dormant->rcv_timeout_ms = ms;
+        } else {
+            dormant->snd_timeout_ms = ms;
+        }
+        return 0;
+    }
+    int sn = toe_sn(s);
+    if (sn < 0) {
         return -1;
     }
     if (level == SOL_SOCKET) {
@@ -189,12 +271,10 @@ static int toe_backend_setsockopt(int s, int level, int optname, const void *opt
                 return 0;
             case SO_RCVTIMEO:
             case SO_SNDTIMEO: {
-                if (optlen < (socklen_t)sizeof(struct timeval)) {
-                    errno = EINVAL;
+                uint32_t ms;
+                if (toe_timeval_to_ms(optval, optlen, &ms) < 0) {
                     return -1;
                 }
-                const struct timeval *tv = (const struct timeval *)optval;
-                uint32_t ms = (uint32_t)((tv->tv_sec * 1000) + (tv->tv_usec / 1000));
                 wiztoe_opt_t o = (optname == SO_RCVTIMEO) ? WIZTOE_OPT_RCVTIMEO_MS : WIZTOE_OPT_SNDTIMEO_MS;
                 if (wiztoe_setsockopt(sn, o, &ms, sizeof(ms)) < 0) {
                     errno = EINVAL;
@@ -244,12 +324,21 @@ static int toe_backend_setsockopt(int s, int level, int optname, const void *opt
 }
 
 static int toe_backend_getsockopt(int s, int level, int optname, void *optval, socklen_t *optlen) {
-    int sn = toe_sn(s);
-    if (sn < 0) {
-        return -1;
-    }
     if (optval == NULL || optlen == NULL) {
         errno = EFAULT;
+        return -1;
+    }
+    const wiztoe_socket_settings_t *dormant = toe_vfs_dormant_listener_settings(s);
+    if (dormant != NULL && level == SOL_SOCKET && (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)) {
+        if (*optlen < (socklen_t)sizeof(struct timeval)) {
+            errno = EINVAL;
+            return -1;
+        }
+        toe_ms_to_timeval((optname == SO_RCVTIMEO) ? dormant->rcv_timeout_ms : dormant->snd_timeout_ms, optval, optlen);
+        return 0;
+    }
+    int sn = toe_sn(s);
+    if (sn < 0) {
         return -1;
     }
     if (level == SOL_SOCKET) {
@@ -287,10 +376,7 @@ static int toe_backend_getsockopt(int s, int level, int optname, void *optval, s
                     errno = EINVAL;
                     return -1;
                 }
-                struct timeval *tv = (struct timeval *)optval;
-                tv->tv_sec = (long)(ms / 1000);
-                tv->tv_usec = (long)((ms % 1000) * 1000);
-                *optlen = sizeof(struct timeval);
+                toe_ms_to_timeval(ms, optval, optlen);
                 return 0;
             }
             default:
@@ -320,6 +406,19 @@ static int toe_backend_getsockopt(int s, int level, int optname, void *optval, s
 // must be honoured because settimeout(0) is implemented as fcntl(O_NONBLOCK)
 // with the expectation that the very next recv/send returns EWOULDBLOCK.
 static int toe_backend_fcntl(int s, int cmd, int val) {
+    wiztoe_socket_settings_t *dormant = toe_vfs_dormant_listener_settings(s);
+    if (dormant != NULL) {
+        // Remembered for the listener's next hardware socket.
+        if (cmd == F_SETFL) {
+            dormant->nonblock = (val & O_NONBLOCK) != 0;
+            return 0;
+        }
+        if (cmd == F_GETFL) {
+            return dormant->nonblock ? O_NONBLOCK : 0;
+        }
+        errno = ENOSYS;
+        return -1;
+    }
     int sn = toe_sn(s);
     if (sn < 0) {
         return -1;

@@ -40,7 +40,6 @@ typedef struct {
     uint8_t is_udp;
     uint8_t opened;
     uint8_t listening;
-    uint8_t accepted;
     uint8_t nodelay;
     uint8_t nonblock;          /* O_NONBLOCK via fcntl -- see wiztoe_set_nonblock */
     uint16_t port;
@@ -62,6 +61,8 @@ static uint8_t toe_open_flag(int fd)
 {
     return g_toe[fd].nodelay ? SF_TCP_NODELAY : 0;
 }
+
+static int toe_listener_open(int fd);   /* defined with wiztoe_listen() below */
 
 /* Open the hardware socket for a UDP fd. */
 static int toe_open_udp(int fd)
@@ -120,18 +121,7 @@ int wiztoe_socket(int domain, int type, int protocol)
     return -1;
 }
 
-int wiztoe_is_used(int fd)
-{
-    return toe_fd_valid(fd);
-}
-
-int wiztoe_is_rearming_listener(int fd)
-{
-    /* Must mirror wiztoe_close()'s re-arm condition exactly. */
-    return toe_fd_valid(fd) && g_toe[fd].listening && g_toe[fd].accepted;
-}
-
-/* O_NONBLOCK, set through the wrapped lwip_fcntl. MicroPython's
+/* O_NONBLOCK, set through the socket backend's fcntl. MicroPython's
  * _socket_settimeout sets it for settimeout(0) and clears it otherwise, and
  * expects recv/send to return EWOULDBLOCK immediately instead of waiting. */
 int wiztoe_set_nonblock(int fd, int on)
@@ -173,11 +163,19 @@ void wiztoe_poll(int fd, int *readable, int *writable, int *err)
 
     uint8_t sr = getSn_SR((uint8_t)fd);
 
-    /* A listener that has not been accept()ed yet: readable exactly when a
-     * connection is pending, i.e. when accept() would return immediately.
-     * (In the TOE model the listening socket itself becomes the connection.) */
-    if (g_toe[fd].listening && !g_toe[fd].accepted) {
-        *readable = (sr == SOCK_ESTABLISHED);
+    if (g_toe[fd].listening) {
+        if (sr == SOCK_CLOSED) {
+            /* The peer aborted the handshake (RST, or a SYN scan) and the
+             * chip closed the listener. Put it back, or a poll()-driven
+             * server would never see this port again. */
+            if (toe_listener_open(fd) < 0) {
+                *err = 1;
+                return;
+            }
+            sr = getSn_SR((uint8_t)fd);
+        }
+        /* Readable exactly when accept() would return at once. */
+        *readable = (sr == SOCK_ESTABLISHED || sr == SOCK_CLOSE_WAIT);
         return;
     }
 
@@ -216,6 +214,26 @@ int wiztoe_bind(int fd, uint16_t port)
     return 0;
 }
 
+/* Put hardware socket fd into LISTEN on g_toe[fd].port. Shared by listen(),
+ * by accept()/poll() when the chip dropped a listener to SOCK_CLOSED, and by
+ * wiztoe_listen_with(). */
+static int toe_listener_open(int fd)
+{
+    if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd)
+        return -1;
+    g_toe[fd].opened = 1;
+
+    /* Port 0 let the chip pick one; record it so the listener re-created
+     * after accept() serves the same port, not a fresh random one. */
+    g_toe[fd].port = getSn_PORT((uint8_t)fd);
+
+    if (listen((uint8_t)fd) != SOCK_OK)
+        return -1;
+
+    g_toe[fd].listening = 1;
+    return 0;
+}
+
 int wiztoe_listen(int fd, int backlog)
 {
     (void)backlog;
@@ -223,15 +241,7 @@ int wiztoe_listen(int fd, int backlog)
     if (!toe_fd_valid(fd) || g_toe[fd].is_udp)
         return -1;
 
-    if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd)
-        return -1;
-    g_toe[fd].opened = 1;
-
-    if (listen((uint8_t)fd) != SOCK_OK)
-        return -1;
-
-    g_toe[fd].listening = 1;
-    return 0;
+    return toe_listener_open(fd);
 }
 
 int wiztoe_accept(int fd)
@@ -250,16 +260,18 @@ int wiztoe_accept(int fd)
     {
         uint8_t sr = getSn_SR((uint8_t)fd);
 
-        if (sr == SOCK_ESTABLISHED)
+        if (sr == SOCK_ESTABLISHED || sr == SOCK_CLOSE_WAIT)
         {
-            g_toe[fd].accepted = 1;
+            /* This hardware socket is the connection from here on. A caller
+             * that wants to keep accepting opens a new listener with
+             * wiztoe_listen_with(); this one no longer is. */
+            g_toe[fd].listening = 0;
             return fd;
         }
         if (sr == SOCK_CLOSED)
         {
-            if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd)
-                return -1;
-            if (listen((uint8_t)fd) != SOCK_OK)
+            /* Handshake aborted by the peer: back to LISTEN. */
+            if (toe_listener_open(fd) < 0)
                 return -1;
         }
         if (g_toe[fd].nonblock)
@@ -569,23 +581,56 @@ int wiztoe_close(int fd)
     if (!toe_fd_valid(fd))
         return -1;
 
-    if (g_toe[fd].listening && g_toe[fd].accepted)
-    {
-        toe_tcp_disconnect_if_connected(fd);
-        if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd)
-            return -1;
-        if (listen((uint8_t)fd) != SOCK_OK)
-            return -1;
-        g_toe[fd].accepted = 0;
-        return 0;
-    }
-
     if (g_toe[fd].opened && !g_toe[fd].is_udp)
         toe_tcp_disconnect_if_connected(fd);
     if (g_toe[fd].opened)
         close((uint8_t)fd);
     memset(&g_toe[fd], 0, sizeof(g_toe[fd]));
     return 0;
+}
+
+int wiztoe_get_settings(int fd, wiztoe_socket_settings_t *out)
+{
+    if (!toe_fd_valid(fd) || out == NULL)
+        return -1;
+
+    out->port = g_toe[fd].port;
+    out->nodelay = g_toe[fd].nodelay;
+    out->nonblock = g_toe[fd].nonblock;
+    out->rcv_timeout_ms = g_toe[fd].rcv_timeout_ms;
+    out->snd_timeout_ms = g_toe[fd].snd_timeout_ms;
+    /* Per-socket chip registers. They survive the OPEN that turned the
+     * listener into a connection, so the connection still carries the
+     * listener's values (inheriting them, as lwIP's accept() does too). */
+    out->keepalive_timer = getSn_KPALVTR((uint8_t)fd);
+    out->ttl = getSn_TTL((uint8_t)fd);
+    out->tos = getSn_TOS((uint8_t)fd);
+    return 0;
+}
+
+int wiztoe_listen_with(const wiztoe_socket_settings_t *settings)
+{
+    if (settings == NULL)
+        return -1;
+
+    int fd = wiztoe_socket(0, 1 /* SOCK_STREAM */, 0);
+    if (fd < 0)
+        return -1;                             /* every usable socket is taken */
+
+    g_toe[fd].port = settings->port;
+    g_toe[fd].nodelay = settings->nodelay;
+    g_toe[fd].nonblock = settings->nonblock;
+    g_toe[fd].rcv_timeout_ms = settings->rcv_timeout_ms;
+    g_toe[fd].snd_timeout_ms = settings->snd_timeout_ms;
+    if (toe_listener_open(fd) < 0)
+    {
+        wiztoe_close(fd);
+        return -1;
+    }
+    setSn_KPALVTR((uint8_t)fd, settings->keepalive_timer);
+    setSn_TTL((uint8_t)fd, settings->ttl);
+    setSn_TOS((uint8_t)fd, settings->tos);
+    return fd;
 }
 
 int wiztoe_setsockopt(int fd, wiztoe_opt_t opt, const void *val, size_t len)

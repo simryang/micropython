@@ -17,6 +17,14 @@
 //      backend (toe_socket_backend.c) maps a descriptor straight to its
 //      hardware socket.
 //
+// A descriptor is a SLOT here, not a hardware socket number. ESP-IDF fixes a
+// registered fd's driver-local id for good, but a listener has to change
+// hardware sockets: the chip turns a listening socket into the connection it
+// accepts, so after accept() the listener's descriptor must point at a fresh
+// socket (toe_vfs_relisten). When no socket is free the listener is DORMANT:
+// the descriptor stays valid, remembers how to listen again, and the next
+// accept()/select() on it tries again (toe_vfs_wake_dormant_listener).
+//
 // NOTE: we must register with permanent=false. In ESP-IDF, permanent=true
 // means "this is a socket fd", and esp_vfs_select() then dereferences the
 // driver's socket_select/get_socket_select_semaphore with no NULL guard
@@ -28,6 +36,8 @@
 
 #include <stdbool.h>
 
+#include "wiznet_toe.h"
+
 // Registers the TOE VFS driver. Idempotent; safe to call from net_init().
 // Returns false (and logs) if registration fails.
 bool toe_vfs_register(void);
@@ -35,9 +45,30 @@ bool toe_vfs_register(void);
 // Claims a global fd for hardware socket `sn`. Returns the fd, or -1.
 int toe_vfs_alloc_fd(int sn);
 
-// Maps a global fd back to its hardware socket number, or -1 if this fd is
-// not ours (i.e. it belongs to lwIP or another driver).
+// Maps a global fd to its hardware socket number, or -1 if there is none:
+// the fd is not ours (it belongs to lwIP or another driver), or it is a
+// dormant listener.
 int toe_vfs_sn_from_fd(int fd);
+
+// True for every fd this driver handed out, dormant listeners included.
+bool toe_vfs_owns_fd(int fd);
+
+// After accept() turned the hardware socket behind listener `fd` into the
+// connection: give `fd` a fresh hardware socket listening with `settings`.
+// Returns the new socket number, or -1 when none is free -- `fd` is then a
+// dormant listener (see toe_vfs_wake_dormant_listener).
+int toe_vfs_relisten(int fd, const wiztoe_socket_settings_t *settings);
+
+bool toe_vfs_is_dormant_listener(int fd);
+
+// Tries again to put a hardware socket behind dormant listener `fd`.
+// Returns the socket number, or -1 if none is free yet (or fd is not dormant).
+int toe_vfs_wake_dormant_listener(int fd);
+
+// The settings a dormant listener will be re-created with, or NULL if `fd` is
+// not a dormant listener. The backend edits them when the program changes the
+// listener's blocking mode or timeout while it is dormant.
+wiztoe_socket_settings_t *toe_vfs_dormant_listener_settings(int fd);
 
 // Releases every fd we hold, freeing each one's esp_vfs fd-table entry. Pairs
 // with wiztoe_reset_sockets(): a chip reset invalidates all hardware sockets,

@@ -55,8 +55,35 @@ int  wiztoe_close(int fd);
 /* TCP */
 int  wiztoe_bind(int fd, uint16_t port);
 int  wiztoe_listen(int fd, int backlog);
-int  wiztoe_accept(int fd);                                /* listener becomes the connection */
+/* Wait for a connection on listener fd (bounded by O_NONBLOCK / SO_RCVTIMEO,
+ * WIZTOE_ERR_TIMEOUT when it runs out). On success the hardware socket fd IS
+ * the connection -- the chip turns a listening socket into the connection it
+ * accepted -- and fd is no longer a listener. The caller re-creates the
+ * listener elsewhere with wiztoe_get_settings() + wiztoe_listen_with().
+ * A connection the peer already half-closed (SOCK_CLOSE_WAIT) is accepted
+ * too: its data is still in the RX buffer and recv() returns it, then EOF. */
+int  wiztoe_accept(int fd);
 int  wiztoe_connect(int fd, const uint8_t ip[4], uint16_t port);
+
+/* Everything about a socket that is not the hardware socket itself: what
+ * wiztoe_listen_with() needs to re-create a listener on another hardware
+ * socket after accept() turned the old one into a connection, or later, once a
+ * hardware socket is free again (MicroPython addition, not in wsm_driver). */
+typedef struct {
+    uint16_t port;
+    uint8_t  nodelay;
+    uint8_t  nonblock;
+    uint32_t rcv_timeout_ms;
+    uint32_t snd_timeout_ms;
+    uint8_t  keepalive_timer;   /* Sn_KPALVTR, units of 5 s; 0 = off */
+    uint8_t  ttl;               /* Sn_TTL */
+    uint8_t  tos;               /* Sn_TOS */
+} wiztoe_socket_settings_t;
+
+int  wiztoe_get_settings(int fd, wiztoe_socket_settings_t *out);
+/* Open a fresh hardware socket listening with these settings. Returns its
+ * number, or -1 when every usable hardware socket is taken. */
+int  wiztoe_listen_with(const wiztoe_socket_settings_t *settings);
 int  wiztoe_send(int fd, const void *buf, size_t len);
 int  wiztoe_recv(int fd, void *buf, size_t len);           /* 0 = EOF */
 
@@ -71,25 +98,16 @@ int  wiztoe_recvfrom(int fd, void *buf, size_t len, uint8_t ip[4], uint16_t *por
 /* Readiness for select()/poll(), decided from the chip's socket registers.
  * MicroPython addition (not in wsm_driver). Each out-param is set to 0/1.
  * A listener with a pending connection reports readable (accept won't block);
- * a peer-closed TCP socket reports readable too, so recv() can return EOF. */
+ * a peer-closed TCP socket reports readable too, so recv() can return EOF.
+ * A listener the chip dropped to SOCK_CLOSED (handshake aborted by the peer,
+ * e.g. a SYN scan) is put back into LISTEN here, as accept() also does. */
 void wiztoe_poll(int fd, int *readable, int *writable, int *err);
 
-/* True while the software socket slot is still allocated. wiztoe_close() has
- * two outcomes: an accepted listener is RE-ARMED (slot kept, so the fd must
- * stay valid for the next accept()), anything else is fully closed (slot
- * freed). Callers that own an fd mapping must check this to decide whether to
- * release the fd. MicroPython addition (not in wsm_driver). */
-int  wiztoe_is_used(int fd);
-
-/* O_NONBLOCK state (wrapped lwip_fcntl). When set, wiztoe_recv/recvfrom/send
- * return WIZTOE_ERR_TIMEOUT immediately instead of waiting. */
+/* O_NONBLOCK state (from the socket backend's fcntl). When set,
+ * wiztoe_recv/recvfrom/send/accept return WIZTOE_ERR_TIMEOUT immediately
+ * instead of waiting. */
 int  wiztoe_set_nonblock(int fd, int on);
 int  wiztoe_get_nonblock(int fd);
-
-/* True when fd is an accepted listener, i.e. wiztoe_close() would RE-ARM it on
- * the same hardware socket instead of freeing it. The backend's close checks
- * this to keep the fd registered across a re-arm (see toe_backend_close). */
-int  wiztoe_is_rearming_listener(int fd);
 
 /* helpers */
 int  wiztoe_is_udp(int fd);
