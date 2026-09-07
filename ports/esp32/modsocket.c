@@ -120,6 +120,12 @@ const socket_backend_t socket_backend_lwip = {
     .join_multicast_group = socket_backend_lwip_join_multicast_group,
 };
 
+static const socket_backend_t *socket_backend_default = &socket_backend_lwip;
+
+void socket_backend_set_default(const socket_backend_t *backend) {
+    socket_backend_default = backend;
+}
+
 void _socket_settimeout(socket_obj_t *sock, uint64_t timeout_ms);
 
 #if MICROPY_PY_SOCKET_EVENTS
@@ -310,7 +316,7 @@ static mp_obj_t socket_make_new(const mp_obj_type_t *type_in, size_t n_args, siz
     mp_arg_check_num(n_args, n_kw, 0, 3, false);
 
     socket_obj_t *sock = mp_obj_malloc_with_finaliser(socket_obj_t, type_in);
-    sock->backend = &socket_backend_lwip;
+    sock->backend = socket_backend_default;
     sock->domain = AF_INET;
     sock->type = SOCK_STREAM;
     sock->proto = 0;

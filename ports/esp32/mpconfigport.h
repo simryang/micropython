@@ -209,6 +209,9 @@
 #ifndef MICROPY_PY_NETWORK_WLAN
 #define MICROPY_PY_NETWORK_WLAN             (1)
 #endif
+#ifndef MICROPY_PY_NETWORK_WIZNET_TOE
+#define MICROPY_PY_NETWORK_WIZNET_TOE       (0)
+#endif
 #ifndef MICROPY_PY_MACHINE_SDCARD
 #define MICROPY_PY_MACHINE_SDCARD           (1)
 #endif

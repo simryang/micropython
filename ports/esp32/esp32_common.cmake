@@ -107,6 +107,10 @@ if(MICROPY_PY_TINYUSB)
         ${MICROPY_BOARD_DIR})
 endif()
 
+# WIZnet W5500 in hardware-socket mode (its own TCP/IP stack), as a second
+# socket backend next to lwIP.  See wiznet_toe/ and modsocket.h.
+option(MICROPY_PY_NETWORK_WIZNET_TOE "Support WIZnet W5500 hardware sockets (network.WIZNET_TOE)" OFF)
+
 list(APPEND MICROPY_SOURCE_PORT
     panichandler.c
     adc.c
@@ -147,6 +151,29 @@ list(APPEND MICROPY_SOURCE_PORT
     machine_sdcard.c
     modespnow.c
 )
+if(MICROPY_PY_NETWORK_WIZNET_TOE)
+    list(APPEND MICROPY_SOURCE_PORT
+        # Vendored ioLibrary_Driver: W5500 register access and hardware sockets.
+        wiznet_toe/Ethernet/socket.c
+        wiznet_toe/Ethernet/wizchip_conf.c
+        wiznet_toe/Ethernet/W5500/w5500.c
+        wiznet_toe/Internet/DHCP/dhcp.c
+        wiznet_toe/Internet/DNS/dns.c
+        # Port layer: SPI bring-up, network identity, VFS descriptors, DHCP,
+        # DNS, the socket backend and the network.WIZNET_TOE interface object.
+        wiznet_toe/toe_spi_port.c
+        wiznet_toe/toe_net_bringup.c
+        wiznet_toe/toe_port.c
+        wiznet_toe/toe_vfs.c
+        wiznet_toe/wiznet_toe.c
+        wiznet_toe/toe_socket_backend.c
+        wiznet_toe/toe_dhcp.c
+        wiznet_toe/toe_dns.c
+        wiznet_toe/toe_dns_wrap.c
+        wiznet_toe/network_wiznet_toe.c
+        wiznet_toe/modwiznettoe.c
+    )
+endif()
 list(TRANSFORM MICROPY_SOURCE_PORT PREPEND ${MICROPY_PORT_DIR}/)
 list(APPEND MICROPY_SOURCE_PORT ${CMAKE_BINARY_DIR}/pins.c)
 
@@ -288,6 +315,48 @@ target_compile_options(usermod INTERFACE ${idf_compile_options})
 target_include_directories(${MICROPY_TARGET} PUBLIC
     ${IDF_PATH}/components/bt/host/nimble/nimble
 )
+
+if(MICROPY_PY_NETWORK_WIZNET_TOE)
+    # ioLibrary headers include each other by bare name, so their directories
+    # go on the include path; _WIZCHIP_ selects the W5500 code in wizchip_conf.h.
+    target_include_directories(${MICROPY_TARGET} PUBLIC
+        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS
+    )
+    target_compile_definitions(${MICROPY_TARGET} PUBLIC
+        MICROPY_PY_NETWORK_WIZNET_TOE=1
+        _WIZCHIP_=5500
+    )
+    # ioLibrary's socket.c defines a global close(uint8_t) that would hijack
+    # newlib's POSIX close().  Rename it to wiz_close in every translation unit
+    # that uses ioLibrary's socket API, so ioLibrary stays consistent with
+    # itself and POSIX close() is left alone.
+    set_source_files_properties(
+        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/socket.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/wizchip_conf.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/W5500/w5500.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/wiznet_toe.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dhcp.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dns.c
+        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
+    )
+    # The vendored DHCP/DNS sources trip ESP-IDF's promoted diagnostics
+    # (-Werror=format and friends), which a plain -Wno-error does not undo.
+    set_source_files_properties(
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP/dhcp.c
+        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS/dns.c
+        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close" COMPILE_OPTIONS "-w"
+    )
+    # Name resolution still reaches lwip_getaddrinfo() directly from
+    # modsocket.c; toe_dns_wrap.c intercepts it until the socket module has
+    # a resolver hook.
+    target_link_options(${MICROPY_TARGET} PUBLIC
+        -Wl,--undefined=__wrap_lwip_getaddrinfo
+        -Wl,--wrap=lwip_getaddrinfo
+        -Wl,--wrap=lwip_freeaddrinfo
+    )
+endif()
 
 # Add additional extmod and usermod components.
 if (MICROPY_PY_BTREE)

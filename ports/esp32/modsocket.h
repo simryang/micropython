@@ -64,4 +64,9 @@ typedef struct _socket_backend_t {
 // lwIP, the backend of the WLAN, LAN and PPP interfaces.
 extern const socket_backend_t socket_backend_lwip;
 
+// The backend handed to new sockets.  A network interface with its own stack
+// makes itself the default when it comes up and restores lwIP when it goes
+// down; sockets that already exist keep the backend they were created with.
+void socket_backend_set_default(const socket_backend_t *backend);
+
 #endif // MICROPY_INCLUDED_ESP32_MODSOCKET_H
