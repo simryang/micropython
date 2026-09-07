@@ -122,11 +122,20 @@ add_custom_target(
 # If any of the dependencies in this rule change then the C-preprocessor step must be run.
 # It only needs to be passed the list of MICROPY_SOURCE_QSTR files that have changed since
 # it was last run, but it looks like it's not possible to specify that with cmake.
+# The full cflags/sources argument list can exceed cmd.exe's ~8191 character
+# command-line limit on Windows, so the long part is written to a response
+# file that makeqstrdefs.py expands itself (see the @file handling there).
+set(MICROPY_QSTR_PP_RSP ${MICROPY_GENHDR_DIR}/qstr_pp_args.rsp)
+set(MICROPY_QSTR_PP_ARGS cflags ${MICROPY_CPP_FLAGS} -DNO_QSTR cxxflags ${MICROPY_CPP_FLAGS} -DNO_QSTR sources ${MICROPY_SOURCE_QSTR})
+string(REPLACE ";" "\n" MICROPY_QSTR_PP_ARGS_LINES "${MICROPY_QSTR_PP_ARGS}")
+file(GENERATE OUTPUT ${MICROPY_QSTR_PP_RSP} CONTENT "${MICROPY_QSTR_PP_ARGS_LINES}\n")
+
 add_custom_command(
     OUTPUT ${MICROPY_QSTRDEFS_LAST}
-    COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/makeqstrdefs.py pp ${CMAKE_C_COMPILER} -E output ${MICROPY_GENHDR_DIR}/qstr.i.last cflags ${MICROPY_CPP_FLAGS} -DNO_QSTR cxxflags ${MICROPY_CPP_FLAGS} -DNO_QSTR sources ${MICROPY_SOURCE_QSTR}
+    COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/makeqstrdefs.py pp ${CMAKE_C_COMPILER} -E output ${MICROPY_GENHDR_DIR}/qstr.i.last @${MICROPY_QSTR_PP_RSP}
     DEPENDS ${MICROPY_MPVERSION}
         ${MICROPY_SOURCE_QSTR}
+        ${MICROPY_QSTR_PP_RSP}
     VERBATIM
     COMMAND_EXPAND_LISTS
 )
@@ -134,7 +143,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${MICROPY_QSTRDEFS_SPLIT}
     COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/makeqstrdefs.py split qstr ${MICROPY_GENHDR_DIR}/qstr.i.last ${MICROPY_GENHDR_DIR}/qstr _
-    COMMAND touch ${MICROPY_QSTRDEFS_SPLIT}
+    COMMAND ${CMAKE_COMMAND} -E touch ${MICROPY_QSTRDEFS_SPLIT}
     DEPENDS ${MICROPY_QSTRDEFS_LAST}
     VERBATIM
     COMMAND_EXPAND_LISTS
@@ -149,12 +158,27 @@ add_custom_command(
     COMMAND_EXPAND_LISTS
 )
 
+# Portable (no cat/sed shell pipeline, no cmd.exe line-length limit)
+# replacement for the qstrdefs.preprocessed.h generation step. See
+# qstrdefspreprocess.py for what it does.
+set(MICROPY_QSTRDEFS_PP_CFLAGS_RSP ${MICROPY_GENHDR_DIR}/qstrdefs_pp_cflags.rsp)
+set(MICROPY_QSTRDEFS_PP_CFLAGS_QUOTED "")
+foreach(_flag ${MICROPY_CPP_FLAGS})
+    string(REPLACE "\\" "\\\\" _flag_esc "${_flag}")
+    string(REPLACE "\"" "\\\"" _flag_esc "${_flag_esc}")
+    string(APPEND MICROPY_QSTRDEFS_PP_CFLAGS_QUOTED "\"${_flag_esc}\"\n")
+endforeach()
+file(GENERATE OUTPUT ${MICROPY_QSTRDEFS_PP_CFLAGS_RSP} CONTENT "${MICROPY_QSTRDEFS_PP_CFLAGS_QUOTED}")
+
 add_custom_command(
     OUTPUT ${MICROPY_QSTRDEFS_PREPROCESSED}
-    COMMAND cat ${MICROPY_QSTRDEFS_PY} ${MICROPY_QSTRDEFS_PORT} ${MICROPY_QSTRDEFS_COLLECTED} | sed "s/^Q(.*)/\"&\"/" | ${CMAKE_C_COMPILER} -E ${MICROPY_CPP_FLAGS} - | sed "s/^\\\"\\(Q(.*)\\)\\\"/\\1/" > ${MICROPY_QSTRDEFS_PREPROCESSED}
+    COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/qstrdefspreprocess.py
+        ${MICROPY_QSTRDEFS_PY} ${MICROPY_QSTRDEFS_PORT} ${MICROPY_QSTRDEFS_COLLECTED}
+        ${MICROPY_QSTRDEFS_PP_CFLAGS_RSP} ${CMAKE_C_COMPILER} ${MICROPY_QSTRDEFS_PREPROCESSED}
     DEPENDS ${MICROPY_QSTRDEFS_PY}
         ${MICROPY_QSTRDEFS_PORT}
         ${MICROPY_QSTRDEFS_COLLECTED}
+        ${MICROPY_QSTRDEFS_PP_CFLAGS_RSP}
     VERBATIM
     COMMAND_EXPAND_LISTS
 )
@@ -172,7 +196,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${MICROPY_MODULEDEFS_SPLIT}
     COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/makeqstrdefs.py split module ${MICROPY_GENHDR_DIR}/qstr.i.last ${MICROPY_GENHDR_DIR}/module _
-    COMMAND touch ${MICROPY_MODULEDEFS_SPLIT}
+    COMMAND ${CMAKE_COMMAND} -E touch ${MICROPY_MODULEDEFS_SPLIT}
     DEPENDS ${MICROPY_QSTRDEFS_LAST}
     VERBATIM
     COMMAND_EXPAND_LISTS
@@ -198,7 +222,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${MICROPY_ROOT_POINTERS_SPLIT}
     COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/makeqstrdefs.py split root_pointer ${MICROPY_GENHDR_DIR}/qstr.i.last ${MICROPY_GENHDR_DIR}/root_pointer _
-    COMMAND touch ${MICROPY_ROOT_POINTERS_SPLIT}
+    COMMAND ${CMAKE_COMMAND} -E touch ${MICROPY_ROOT_POINTERS_SPLIT}
     DEPENDS ${MICROPY_QSTRDEFS_LAST}
     VERBATIM
     COMMAND_EXPAND_LISTS
@@ -224,7 +248,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${MICROPY_COMPRESSED_SPLIT}
     COMMAND ${Python3_EXECUTABLE} ${MICROPY_PY_DIR}/makeqstrdefs.py split compress ${MICROPY_QSTRDEFS_LAST} ${MICROPY_GENHDR_DIR}/compress _
-    COMMAND touch ${MICROPY_COMPRESSED_SPLIT}
+    COMMAND ${CMAKE_COMMAND} -E touch ${MICROPY_COMPRESSED_SPLIT}
     DEPENDS ${MICROPY_QSTRDEFS_LAST}
     VERBATIM
     COMMAND_EXPAND_LISTS
