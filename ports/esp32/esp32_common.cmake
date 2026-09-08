@@ -339,12 +339,21 @@ if(MICROPY_PY_NETWORK_WIZNET_TOE)
         ${MICROPY_PORT_DIR}/wiznet_toe/toe_dns.c
         PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
     )
-    # The vendored DHCP/DNS sources trip ESP-IDF's promoted diagnostics
-    # (-Werror=format and friends), which a plain -Wno-error does not undo.
+    # Two artefacts of the vendored ioLibrary, which is not edited here:
+    # its socket.h declares IPv6 helpers static without defining them, so
+    # every includer but socket.c gets an unused-function warning per helper;
+    # and the DHCP/DNS clients keep an address-length variable for the newer
+    # recvfrom(), which on the W5500 is macro'd away, leaving it unused.
+    # Silence exactly those and let anything else through.
     set_source_files_properties(
         ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP/dhcp.c
         ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS/dns.c
-        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close" COMPILE_OPTIONS "-w"
+        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
+        COMPILE_OPTIONS "-Wno-unused-function;-Wno-unused-variable"
+    )
+    set_source_files_properties(
+        ${MICROPY_PORT_DIR}/wiznet_toe/wiznet_toe.c
+        PROPERTIES COMPILE_OPTIONS "-Wno-unused-function"
     )
 endif()
 
