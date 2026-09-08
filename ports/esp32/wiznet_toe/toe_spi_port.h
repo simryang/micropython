@@ -21,9 +21,6 @@ void toe_spi_port_reset(void);
 // Used by active(False); the next toe_spi_port_reset() releases it.
 void toe_spi_port_hold_reset(void);
 
-// Diagnostic: raw CS+SPI read of VERSIONR, bypassing wizchip_conf.c/w5500.c.
-uint8_t toe_spi_port_raw_versionr(void);
-
 // SPI clock, in Hz. The compiled-in default is the conservative bring-up rate;
 // set_clock() re-adds the SPI device so the rate can be swept at runtime
 // without reflashing. Returns false (and keeps the old rate) if the value is

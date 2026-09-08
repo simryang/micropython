@@ -170,7 +170,6 @@ if(MICROPY_PY_NETWORK_WIZNET_TOE)
         wiznet_toe/toe_dhcp.c
         wiznet_toe/toe_dns.c
         wiznet_toe/network_wiznet_toe.c
-        wiznet_toe/modwiznettoe.c
     )
 endif()
 list(TRANSFORM MICROPY_SOURCE_PORT PREPEND ${MICROPY_PORT_DIR}/)

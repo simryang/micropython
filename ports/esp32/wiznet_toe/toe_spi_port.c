@@ -191,26 +191,6 @@ void toe_spi_port_reset(void) {
     vTaskDelay(pdMS_TO_TICKS(50));  // generous margin over datasheet's ~2ms PLL lock time
 }
 
-// Bypasses wizchip_conf.c/w5500.c entirely: raw CS+SPI framing to read
-// VERSIONR (0x0039, common register block, VDM read -> control byte 0x00).
-// Used to isolate whether a bad read is in our glue or in the electrical
-// link itself.
-uint8_t toe_spi_port_raw_versionr(void) {
-    printf("wiznettoe: raw CS=%d RST=%d MISO=%d before select\n",
-        gpio_get_level(TOE_PIN_CS), gpio_get_level(TOE_PIN_RST), gpio_get_level(TOE_PIN_MISO));
-
-    uint8_t addr[3] = { 0x00, 0x39, 0x00 };
-    uint8_t val = 0xAA;
-
-    toe_cs_select();
-    toe_spi_write_burst(addr, 3);
-    val = toe_spi_read_byte();
-    toe_cs_deselect();
-
-    printf("wiznettoe: raw addr=%02x %02x %02x -> val=0x%02x\n", addr[0], addr[1], addr[2], val);
-    return val;
-}
-
 bool toe_spi_port_init(void) {
     if (s_initted) {
         return true;
