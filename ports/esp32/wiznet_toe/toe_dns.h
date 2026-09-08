@@ -3,9 +3,10 @@
 // Backed by ioLibrary's DNS_run() (Internet/DNS/dns.c) on a hardware socket
 // borrowed from the pool for the duration of the query.
 //
-// Plain C types only -- no lwIP headers -- so that wiztoe_wrap.c can call this
-// while also including lwip/sockets.h. (Same split as wiznet_toe.c vs
-// wiztoe_wrap.c: only the ioLibrary-side TU sees ioLibrary's socket names.)
+// Plain C types only -- no lwIP headers -- so that toe_socket_backend.c can
+// call this while also including lwip/sockets.h. (Same split as wiznet_toe.c
+// vs toe_socket_backend.c: only the ioLibrary-side TU sees ioLibrary's socket
+// names.)
 
 #ifndef MICROPY_INCLUDED_ESP32_WIZNET_TOE_DNS_H
 #define MICROPY_INCLUDED_ESP32_WIZNET_TOE_DNS_H

@@ -169,7 +169,6 @@ if(MICROPY_PY_NETWORK_WIZNET_TOE)
         wiznet_toe/toe_socket_backend.c
         wiznet_toe/toe_dhcp.c
         wiznet_toe/toe_dns.c
-        wiznet_toe/toe_dns_wrap.c
         wiznet_toe/network_wiznet_toe.c
         wiznet_toe/modwiznettoe.c
     )
@@ -347,14 +346,6 @@ if(MICROPY_PY_NETWORK_WIZNET_TOE)
         ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP/dhcp.c
         ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS/dns.c
         PROPERTIES COMPILE_DEFINITIONS "close=wiz_close" COMPILE_OPTIONS "-w"
-    )
-    # Name resolution still reaches lwip_getaddrinfo() directly from
-    # modsocket.c; toe_dns_wrap.c intercepts it until the socket module has
-    # a resolver hook.
-    target_link_options(${MICROPY_TARGET} PUBLIC
-        -Wl,--undefined=__wrap_lwip_getaddrinfo
-        -Wl,--wrap=lwip_getaddrinfo
-        -Wl,--wrap=lwip_freeaddrinfo
     )
 endif()
 

@@ -14,20 +14,30 @@
  * listener keeps its own, moved onto a fresh hardware socket (or dormant until
  * one is free; see toe_vfs.h).
  *
- * Adapted from wiztoe_wrap.c, which reached the same code through
- * -Wl,--wrap=lwip_* and therefore had to dispatch on the descriptor and fall
- * back to lwIP for anything that was not ours.
+ * Name resolution is the one entry without a descriptor: getaddrinfo() runs
+ * the chip's DNS client (toe_dns.c) on a hardware socket borrowed for the
+ * query, so socket.getaddrinfo(), bind() and connect() resolve names on this
+ * backend the same way they do on lwIP.
+ *
+ * Adapted from wiztoe_wrap.c and toe_dns_wrap.c, which reached the same code
+ * through -Wl,--wrap=lwip_* and therefore had to dispatch on the descriptor
+ * (or on whether the interface was up) and fall back to lwIP for anything
+ * that was not ours.
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>       // calloc()/free() -- getaddrinfo() results
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>       // close() -- see toe_backend_close
 
-#include "lwip/netdb.h"   // lwip_getaddrinfo(), lwip_freeaddrinfo()
-#include "lwip/sockets.h" // struct sockaddr_in, lwip_htons/htonl
+#include "lwip/ip4_addr.h" // ip4addr_aton()
+#include "lwip/netdb.h"    // struct addrinfo, EAI_*
+#include "lwip/sockets.h"  // struct sockaddr_in, lwip_htons/htonl
 
-#include "toe_port.h"     // toe_yield_1ms(), toe_time_us()
+#include "toe_dns.h"         // the chip's DNS client
+#include "toe_net_bringup.h" // toe_net_is_up()
+#include "toe_port.h"        // toe_yield_1ms(), toe_time_us()
 #include "toe_socket_backend.h"
 #include "toe_vfs.h"
 #include "wiznet_toe.h"
@@ -510,6 +520,79 @@ static int toe_backend_join_multicast_group(int s, const uint8_t *mreq) {
     return -1;
 }
 
+// A getaddrinfo() result: one IPv4 address, laid out so freeaddrinfo() frees
+// it in one go.  Only this backend's results reach toe_backend_freeaddrinfo(),
+// because a result is freed by the backend that produced it (modsocket.h).
+typedef struct {
+    struct addrinfo ai;
+    struct sockaddr_in sa;
+    char canonname[128];
+} toe_addrinfo_t;
+
+// Same contract as lwip_getaddrinfo().  A numeric address is parsed with
+// lwIP's own parser, so both backends accept the same forms and no query is
+// sent; a name goes to the DNS server the chip holds (from the DHCP lease or
+// ifconfig()) through ioLibrary's DNS client, which borrows a hardware socket
+// for the query.  The port comes from servname.  Answers with one AF_INET
+// entry.
+static int toe_backend_getaddrinfo(const char *nodename, const char *servname, const struct addrinfo *hints, struct addrinfo **res) {
+    if (res == NULL) {
+        return EAI_FAIL;
+    }
+    *res = NULL;
+    if (nodename == NULL) {
+        return EAI_NONAME;
+    }
+    if (!toe_net_is_up()) {
+        return EAI_FAIL;
+    }
+
+    ip4_addr_t addr;
+    if (!ip4addr_aton(nodename, &addr)) {
+        uint8_t server[4];
+        uint8_t ip[4];
+        if (!toe_dns_server(server) || !toe_dns_resolve(server, nodename, ip)) {
+            return EAI_FAIL;
+        }
+        IP4_ADDR(&addr, ip[0], ip[1], ip[2], ip[3]);
+    }
+
+    unsigned port = 0;
+    if (servname != NULL) {
+        for (const char *s = servname; *s >= '0' && *s <= '9'; s++) {
+            port = port * 10 + (unsigned)(*s - '0');
+        }
+    }
+
+    toe_addrinfo_t *p = calloc(1, sizeof(*p));
+    if (p == NULL) {
+        return EAI_MEMORY;
+    }
+    p->sa.sin_family = AF_INET;
+    p->sa.sin_len = sizeof(p->sa);
+    p->sa.sin_port = lwip_htons((uint16_t)port);
+    p->sa.sin_addr.s_addr = ip4_addr_get_u32(&addr);
+
+    // modsocket.c reads ai_canonname back, so always provide one.
+    strncpy(p->canonname, nodename, sizeof(p->canonname) - 1);
+
+    p->ai.ai_family = AF_INET;
+    p->ai.ai_socktype = (hints && hints->ai_socktype) ? hints->ai_socktype : SOCK_STREAM;
+    p->ai.ai_protocol = (hints && hints->ai_protocol) ? hints->ai_protocol : 0;
+    p->ai.ai_addrlen = sizeof(p->sa);
+    p->ai.ai_addr = (struct sockaddr *)&p->sa;
+    p->ai.ai_canonname = p->canonname;
+    p->ai.ai_next = NULL;
+
+    *res = &p->ai;
+    return 0;
+}
+
+static void toe_backend_freeaddrinfo(struct addrinfo *ai) {
+    // ai is the first member of the toe_addrinfo_t it lives in.
+    free(ai);
+}
+
 const socket_backend_t socket_backend_wiznet_toe = {
     .socket = toe_backend_socket,
     .close = toe_backend_close,
@@ -524,8 +607,6 @@ const socket_backend_t socket_backend_wiznet_toe = {
     .recvfrom = toe_backend_recvfrom,
     .sendto = toe_backend_sendto,
     .join_multicast_group = toe_backend_join_multicast_group,
-    // Still lwIP's resolver: the linker wrap in toe_dns_wrap.c redirects
-    // it to the chip's DNS client while the interface is up.
-    .getaddrinfo = lwip_getaddrinfo,
-    .freeaddrinfo = lwip_freeaddrinfo,
+    .getaddrinfo = toe_backend_getaddrinfo,
+    .freeaddrinfo = toe_backend_freeaddrinfo,
 };
