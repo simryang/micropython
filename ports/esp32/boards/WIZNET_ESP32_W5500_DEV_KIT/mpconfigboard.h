@@ -4,8 +4,14 @@
 // A CH340 on UART0 sits next to the native USB port.
 #define MICROPY_HW_ENABLE_UART_REPL         (1)
 
-// No default I2C pins: GPIO 9, the generic ESP32-S3 default for I2C0 SCL, is
-// the W5500's RESET on this board.
+// The port's ESP32-S3 fallback puts I2C0 SCL on GPIO 9, which is the W5500's
+// RESET on this board, so a pin-less machine.I2C(0) would reset the chip.
+// Use the first free header pins instead (per the schematic; also free on
+// the sister W6300 board).
+#define MICROPY_HW_I2C0_SCL                 (5)
+#define MICROPY_HW_I2C0_SDA                 (4)
+#define MICROPY_HW_I2C1_SCL                 (7)
+#define MICROPY_HW_I2C1_SDA                 (6)
 
 // W5500 wiring, in the names the WIZNET5K driver reads for its board defaults
 // (extmod/network_wiznet5k.c), so that network.WIZNET_TOE() needs no

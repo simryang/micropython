@@ -22,5 +22,6 @@ nic.ifconfig('dhcp')
 | RESET | 9 |
 | INT | 14 (not used by the driver) |
 
-GPIO 9 being the W5500's RESET, the board has no default I2C pins: pass
-`scl=` and `sda=` to `machine.I2C`.
+GPIO 9 being the W5500's RESET, the default I2C pins are moved off the
+generic ESP32-S3 choice: `machine.I2C(0)` uses SCL=5/SDA=4 and
+`machine.I2C(1)` uses SCL=7/SDA=6.
