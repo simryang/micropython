@@ -21,6 +21,9 @@
 #include "py/objtuple.h"
 #include "py/runtime.h"
 
+#include "extmod/modmachine.h"
+#include "extmod/virtpin.h"
+
 #include "modnetwork.h"   // ETH_* status codes, shared with network.LAN
 
 #include "toe_dhcp.h"
@@ -79,6 +82,7 @@ static mp_obj_t format_ipv4_str(const uint8_t ip[4]) {
 }
 
 // WIZNET_TOE(spi=machine.SPI, cs=Pin, reset=Pin)
+// WIZNET_TOE()  -- on a board whose definition supplies the wiring
 //
 // The wiring comes in the shape network.LAN takes for its SPI PHYs: an
 // initialised machine.SPI object whose bus the chip hangs off, plus the pins
@@ -86,6 +90,10 @@ static mp_obj_t format_ipv4_str(const uint8_t ip[4]) {
 // chip is driven at.  Once wired, a call with no arguments returns the same
 // object, so a script can reach a running interface without repeating the
 // wiring.
+//
+// A board definition can supply the wiring instead, in the MICROPY_HW_WIZNET_*
+// macros the WIZNET5K driver reads for the same purpose (see
+// extmod/network_wiznet5k.c); a bare call then builds the SPI bus from them.
 static mp_obj_t wiznet_toe_make_new(const mp_obj_type_t *type, size_t n_args,
     size_t n_kw, const mp_obj_t *all_args) {
     wiznet_toe_obj_t *self = &wiznet_toe_obj;
@@ -93,27 +101,49 @@ static mp_obj_t wiznet_toe_make_new(const mp_obj_type_t *type, size_t n_args,
         return MP_OBJ_FROM_PTR(self);
     }
 
-    enum { ARG_spi, ARG_cs, ARG_reset };
-    static const mp_arg_t allowed_args[] = {
-        { MP_QSTR_spi, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
-        { MP_QSTR_cs, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
-        { MP_QSTR_reset, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
-    };
-    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
-    mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+    toe_spi_port_config_t wiring;
+    uint32_t baudrate;
+    #ifdef MICROPY_HW_WIZNET_SPI_ID
+    if (n_args == 0 && n_kw == 0) {
+        mp_obj_t sck = MP_OBJ_NEW_SMALL_INT(MICROPY_HW_WIZNET_SPI_SCK);
+        mp_obj_t mosi = MP_OBJ_NEW_SMALL_INT(MICROPY_HW_WIZNET_SPI_MOSI);
+        mp_obj_t miso = MP_OBJ_NEW_SMALL_INT(MICROPY_HW_WIZNET_SPI_MISO);
+        mp_obj_t spi_args[] = {
+            MP_OBJ_NEW_SMALL_INT(MICROPY_HW_WIZNET_SPI_ID),
+            MP_OBJ_NEW_SMALL_INT(MICROPY_HW_WIZNET_SPI_BAUDRATE),
+            MP_OBJ_NEW_QSTR(MP_QSTR_sck), mp_pin_make_new(NULL, 1, 0, &sck),
+            MP_OBJ_NEW_QSTR(MP_QSTR_mosi), mp_pin_make_new(NULL, 1, 0, &mosi),
+            MP_OBJ_NEW_QSTR(MP_QSTR_miso), mp_pin_make_new(NULL, 1, 0, &miso),
+        };
+        mp_obj_t spi = MP_OBJ_TYPE_GET_SLOT(&machine_spi_type, make_new)(&machine_spi_type, 2, 3, spi_args);
+        wiring.host = machine_hw_spi_get_host(spi);
+        wiring.cs_pin = MICROPY_HW_WIZNET_PIN_CS;
+        wiring.reset_pin = MICROPY_HW_WIZNET_PIN_RST;
+        baudrate = MICROPY_HW_WIZNET_SPI_BAUDRATE;
+    } else
+    #endif
+    {
+        enum { ARG_spi, ARG_cs, ARG_reset };
+        static const mp_arg_t allowed_args[] = {
+            { MP_QSTR_spi, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
+            { MP_QSTR_cs, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
+            { MP_QSTR_reset, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
+        };
+        mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+        mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+        wiring.host = machine_hw_spi_get_host(args[ARG_spi].u_obj);
+        wiring.cs_pin = machine_pin_get_id(args[ARG_cs].u_obj);
+        wiring.reset_pin = machine_pin_get_id(args[ARG_reset].u_obj);
+        baudrate = machine_hw_spi_get_baudrate(args[ARG_spi].u_obj);
+    }
 
-    toe_spi_port_config_t wiring = {
-        .host = machine_hw_spi_get_host(args[ARG_spi].u_obj),
-        .cs_pin = machine_pin_get_id(args[ARG_cs].u_obj),
-        .reset_pin = machine_pin_get_id(args[ARG_reset].u_obj),
-    };
     bool rewired = wiring.host != self->wiring.host
         || wiring.cs_pin != self->wiring.cs_pin
         || wiring.reset_pin != self->wiring.reset_pin;
     if (rewired && toe_net_is_up()) {
         mp_raise_ValueError(MP_ERROR_TEXT("can't rewire while active"));
     }
-    if (!toe_spi_port_set_clock(machine_hw_spi_get_baudrate(args[ARG_spi].u_obj))) {
+    if (!toe_spi_port_set_clock(baudrate)) {
         mp_raise_ValueError(MP_ERROR_TEXT("SPI baudrate out of range"));
     }
     self->wiring = wiring;
