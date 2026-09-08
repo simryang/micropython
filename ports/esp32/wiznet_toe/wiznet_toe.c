@@ -45,38 +45,35 @@ typedef struct {
     uint16_t port;
     uint32_t rcv_timeout_ms;
     uint32_t snd_timeout_ms;
-    uint8_t  dst_ip[4];
+    uint8_t dst_ip[4];
     uint16_t dst_port;
-    uint8_t  connected;
+    uint8_t connected;
 } toe_sock_t;
 
 static toe_sock_t g_toe[WIZTOE_MAX_SOCK];
 
-static int toe_fd_valid(int fd)
-{
+static int toe_fd_valid(int fd) {
     return (fd >= 0) && (fd < WIZTOE_MAX_SOCK) && g_toe[fd].used;
 }
 
-static uint8_t toe_open_flag(int fd)
-{
+static uint8_t toe_open_flag(int fd) {
     return g_toe[fd].nodelay ? SF_TCP_NODELAY : 0;
 }
 
 static int toe_listener_open(int fd);   /* defined with wiztoe_listen() below */
 
 /* Open the hardware socket for a UDP fd. */
-static int toe_open_udp(int fd)
-{
-    if (socket((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd)
+static int toe_open_udp(int fd) {
+    if (socket((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd) {
         return -1;
+    }
 
     g_toe[fd].opened = 1;
     return 0;
 }
 
 void wiztoe_network_init(const uint8_t ip[4], const uint8_t mask[4],
-                         const uint8_t gw[4], const uint8_t mac[6])
-{
+    const uint8_t gw[4], const uint8_t mac[6]) {
     wiz_NetInfo ni;
     memset(&ni, 0, sizeof(ni));
     memcpy(ni.mac, mac, 6);
@@ -84,34 +81,34 @@ void wiztoe_network_init(const uint8_t ip[4], const uint8_t mask[4],
     memcpy(ni.sn, mask, 4);
     memcpy(ni.gw, gw, 4);
     ni.dhcp = NETINFO_STATIC;
-#if (_WIZCHIP_ > W5500)
+    #if (_WIZCHIP_ > W5500)
     {
         uint8_t syslock = SYS_NET_LOCK;
         ctlwizchip(CW_SYS_UNLOCK, &syslock);
     }
-#endif
+    #endif
     ctlnetwork(CN_SET_NETINFO, (void *)&ni);
 }
 
-int wiztoe_socket(int domain, int type, int protocol)
-{
+int wiztoe_socket(int domain, int type, int protocol) {
     (void)domain;
     (void)protocol;
 
-    if (type != 1 /* SOCK_STREAM */ && type != 2 /* SOCK_DGRAM */)
+    if (type != 1 /* SOCK_STREAM */ && type != 2 /* SOCK_DGRAM */) {
         return -1;
+    }
 
     /* Only sockets that bring-up gave a buffer to. Raising the per-socket
      * buffer size spends the chip's fixed 16KB faster, leaving fewer of
      * them -- a 0KB socket would open but never carry data. */
     int usable = toe_net_usable_socks();
-    if (usable > WIZTOE_MAX_SOCK)
+    if (usable > WIZTOE_MAX_SOCK) {
         usable = WIZTOE_MAX_SOCK;
+    }
 
     for (int sn = 0; sn < usable; sn++)
     {
-        if (!g_toe[sn].used)
-        {
+        if (!g_toe[sn].used) {
             memset(&g_toe[sn], 0, sizeof(g_toe[sn]));
             g_toe[sn].used = 1;
             g_toe[sn].is_udp = (type == 2);
@@ -124,26 +121,23 @@ int wiztoe_socket(int domain, int type, int protocol)
 /* O_NONBLOCK, set through the socket backend's fcntl. MicroPython's
  * _socket_settimeout sets it for settimeout(0) and clears it otherwise, and
  * expects recv/send to return EWOULDBLOCK immediately instead of waiting. */
-int wiztoe_set_nonblock(int fd, int on)
-{
-    if (!toe_fd_valid(fd))
+int wiztoe_set_nonblock(int fd, int on) {
+    if (!toe_fd_valid(fd)) {
         return -1;
+    }
     g_toe[fd].nonblock = (on != 0);
     return 0;
 }
 
-int wiztoe_get_nonblock(int fd)
-{
+int wiztoe_get_nonblock(int fd) {
     return toe_fd_valid(fd) && g_toe[fd].nonblock;
 }
 
-int wiztoe_is_udp(int fd)
-{
+int wiztoe_is_udp(int fd) {
     return toe_fd_valid(fd) && g_toe[fd].is_udp;
 }
 
-void wiztoe_poll(int fd, int *readable, int *writable, int *err)
-{
+void wiztoe_poll(int fd, int *readable, int *writable, int *err) {
     *readable = 0;
     *writable = 0;
     *err = 0;
@@ -199,17 +193,17 @@ void wiztoe_poll(int fd, int *readable, int *writable, int *err)
     }
 }
 
-int wiztoe_bind(int fd, uint16_t port)
-{
-    if (!toe_fd_valid(fd))
+int wiztoe_bind(int fd, uint16_t port) {
+    if (!toe_fd_valid(fd)) {
         return -1;
+    }
 
     g_toe[fd].port = port;
 
-    if (g_toe[fd].is_udp)
-    {
-        if (toe_open_udp(fd) < 0)
+    if (g_toe[fd].is_udp) {
+        if (toe_open_udp(fd) < 0) {
             return -1;
+        }
     }
     return 0;
 }
@@ -217,37 +211,38 @@ int wiztoe_bind(int fd, uint16_t port)
 /* Put hardware socket fd into LISTEN on g_toe[fd].port. Shared by listen(),
  * by accept()/poll() when the chip dropped a listener to SOCK_CLOSED, and by
  * wiztoe_listen_with(). */
-static int toe_listener_open(int fd)
-{
-    if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd)
+static int toe_listener_open(int fd) {
+    if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd) {
         return -1;
+    }
     g_toe[fd].opened = 1;
 
     /* Port 0 let the chip pick one; record it so the listener re-created
      * after accept() serves the same port, not a fresh random one. */
     g_toe[fd].port = getSn_PORT((uint8_t)fd);
 
-    if (listen((uint8_t)fd) != SOCK_OK)
+    if (listen((uint8_t)fd) != SOCK_OK) {
         return -1;
+    }
 
     g_toe[fd].listening = 1;
     return 0;
 }
 
-int wiztoe_listen(int fd, int backlog)
-{
+int wiztoe_listen(int fd, int backlog) {
     (void)backlog;
 
-    if (!toe_fd_valid(fd) || g_toe[fd].is_udp)
+    if (!toe_fd_valid(fd) || g_toe[fd].is_udp) {
         return -1;
+    }
 
     return toe_listener_open(fd);
 }
 
-int wiztoe_accept(int fd)
-{
-    if (!toe_fd_valid(fd) || !g_toe[fd].listening)
+int wiztoe_accept(int fd) {
+    if (!toe_fd_valid(fd) || !g_toe[fd].listening) {
         return -1;
+    }
 
     /* Wall-clock deadline, not an iteration count. toe_yield_1ms() is
      * vTaskDelay(pdMS_TO_TICKS(1)) which at CONFIG_FREERTOS_HZ=100 rounds to
@@ -260,36 +255,36 @@ int wiztoe_accept(int fd)
     {
         uint8_t sr = getSn_SR((uint8_t)fd);
 
-        if (sr == SOCK_ESTABLISHED || sr == SOCK_CLOSE_WAIT)
-        {
+        if (sr == SOCK_ESTABLISHED || sr == SOCK_CLOSE_WAIT) {
             /* This hardware socket is the connection from here on. A caller
              * that wants to keep accepting opens a new listener with
              * wiztoe_listen_with(); this one no longer is. */
             g_toe[fd].listening = 0;
             return fd;
         }
-        if (sr == SOCK_CLOSED)
-        {
+        if (sr == SOCK_CLOSED) {
             /* Handshake aborted by the peer: back to LISTEN. */
-            if (toe_listener_open(fd) < 0)
+            if (toe_listener_open(fd) < 0) {
                 return -1;
+            }
         }
-        if (g_toe[fd].nonblock)
+        if (g_toe[fd].nonblock) {
             return WIZTOE_ERR_TIMEOUT;      /* setblocking(False): don't wait */
+        }
         if (g_toe[fd].rcv_timeout_ms &&
-            (toe_time_us() - t0) >= g_toe[fd].rcv_timeout_ms * 1000u)
+            (toe_time_us() - t0) >= g_toe[fd].rcv_timeout_ms * 1000u) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         toe_yield_1ms();
     }
 }
 
-int wiztoe_connect(int fd, const uint8_t ip[4], uint16_t port)
-{
-    if (!toe_fd_valid(fd))
+int wiztoe_connect(int fd, const uint8_t ip[4], uint16_t port) {
+    if (!toe_fd_valid(fd)) {
         return -1;
+    }
 
-    if (g_toe[fd].is_udp)
-    {
+    if (g_toe[fd].is_udp) {
         memcpy(g_toe[fd].dst_ip, ip, 4);
         g_toe[fd].dst_port = port;
         g_toe[fd].connected = 1;
@@ -299,24 +294,25 @@ int wiztoe_connect(int fd, const uint8_t ip[4], uint16_t port)
     /* Randomized ephemeral local port to avoid TIME_WAIT 4-tuple reuse after a
      * reset (ioLibrary's static sock_any_port restarts at 0xC000 each boot). */
     uint16_t lport = g_toe[fd].port;
-    if (lport == 0)
-    {
+    if (lport == 0) {
         lport = (uint16_t)(0xC000u + (toe_time_us() % 0x3FF0u));
         g_toe[fd].port = lport;
     }
-    if (socket((uint8_t)fd, Sn_MR_TCP, lport, toe_open_flag(fd)) != fd)
+    if (socket((uint8_t)fd, Sn_MR_TCP, lport, toe_open_flag(fd)) != fd) {
         return -1;
+    }
     g_toe[fd].opened = 1;
 
     return (connect((uint8_t)fd, (uint8_t *)ip, port) == SOCK_OK) ? 0 : -1;
 }
 
-int wiztoe_send(int fd, const void *buf, size_t len)
-{
-    if (!toe_fd_valid(fd) || g_toe[fd].is_udp)
+int wiztoe_send(int fd, const void *buf, size_t len) {
+    if (!toe_fd_valid(fd) || g_toe[fd].is_udp) {
         return -1;
-    if (len > 0xFFFF)
+    }
+    if (len > 0xFFFF) {
         len = 0xFFFF;
+    }
 
     /* ioLibrary's send() waits for TX buffer space in a while(1) with no
      * yield and, in blocking mode, no exit -- the same pathology as its
@@ -331,43 +327,52 @@ int wiztoe_send(int fd, const void *buf, size_t len)
     for (;;)
     {
         uint8_t sr = getSn_SR((uint8_t)fd);
-        if (sr != SOCK_ESTABLISHED && sr != SOCK_CLOSE_WAIT)
+        if (sr != SOCK_ESTABLISHED && sr != SOCK_CLOSE_WAIT) {
             return -1;
+        }
         free_sz = (uint16_t)getSn_TX_FSR((uint8_t)fd);
-        if (free_sz > 0)
+        if (free_sz > 0) {
             break;
-        if (g_toe[fd].nonblock)
+        }
+        if (g_toe[fd].nonblock) {
             return WIZTOE_ERR_TIMEOUT;         /* -> EWOULDBLOCK, immediately */
+        }
         if (g_toe[fd].snd_timeout_ms &&
-            (toe_time_us() - t0) >= g_toe[fd].snd_timeout_ms * 1000u)
+            (toe_time_us() - t0) >= g_toe[fd].snd_timeout_ms * 1000u) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         toe_yield_1ms();
     }
-    if (len > free_sz)
+    if (len > free_sz) {
         len = free_sz;
+    }
 
     for (;;)
     {
         int32_t n = send((uint8_t)fd, (uint8_t *)buf, (uint16_t)len);
-        if (n != SOCK_BUSY)
+        if (n != SOCK_BUSY) {
             return (n < 0) ? -1 : (int)n;
+        }
         /* Previous SEND command still in flight (SENDOK pending). Retry
          * under the same deadline rather than spinning inside ioLibrary. */
-        if (g_toe[fd].nonblock)
+        if (g_toe[fd].nonblock) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         if (g_toe[fd].snd_timeout_ms &&
-            (toe_time_us() - t0) >= g_toe[fd].snd_timeout_ms * 1000u)
+            (toe_time_us() - t0) >= g_toe[fd].snd_timeout_ms * 1000u) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         toe_yield_1ms();
     }
 }
 
-int wiztoe_recv(int fd, void *buf, size_t len)
-{
-    if (!toe_fd_valid(fd) || g_toe[fd].is_udp)
+int wiztoe_recv(int fd, void *buf, size_t len) {
+    if (!toe_fd_valid(fd) || g_toe[fd].is_udp) {
         return -1;
-    if (len > 0xFFFF)
+    }
+    if (len > 0xFFFF) {
         len = 0xFFFF;
+    }
 
     /* Wall-clock deadline, not an iteration count: toe_yield_1ms() often
      * returns in well under a millisecond (tick-boundary rounding), so a
@@ -377,79 +382,88 @@ int wiztoe_recv(int fd, void *buf, size_t len)
     uint32_t t0 = toe_time_us();
     for (;;)
     {
-        if (getSn_RX_RSR((uint8_t)fd) > 0)
+        if (getSn_RX_RSR((uint8_t)fd) > 0) {
             break;
-        if (getSn_SR((uint8_t)fd) != SOCK_ESTABLISHED)
-        {
+        }
+        if (getSn_SR((uint8_t)fd) != SOCK_ESTABLISHED) {
             /* Peer closed. The RX_RSR read above and this state read are
              * separate SPI transactions, so the payload can land in between:
              * re-check before declaring EOF or it is silently dropped.
              * (Seen with HTTP/1.0 servers that send the body and FIN
              * back-to-back -- recv() returned b'' 1-2 times in 10.) */
-            if (getSn_RX_RSR((uint8_t)fd) > 0)
+            if (getSn_RX_RSR((uint8_t)fd) > 0) {
                 break;
+            }
             return 0;                          /* EOF */
         }
-        if (g_toe[fd].nonblock)
+        if (g_toe[fd].nonblock) {
             return WIZTOE_ERR_TIMEOUT;         /* -> EWOULDBLOCK, immediately */
+        }
         if (g_toe[fd].rcv_timeout_ms &&
-            (toe_time_us() - t0) >= g_toe[fd].rcv_timeout_ms * 1000u)
+            (toe_time_us() - t0) >= g_toe[fd].rcv_timeout_ms * 1000u) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         /* Always yield so the ESP-IDF idle task / watchdog run. */
         toe_yield_1ms();
     }
 
     int32_t n = recv((uint8_t)fd, (uint8_t *)buf, (uint16_t)len);
-    if (n == SOCKERR_SOCKSTATUS || n == SOCKERR_SOCKCLOSED)
+    if (n == SOCKERR_SOCKSTATUS || n == SOCKERR_SOCKCLOSED) {
         return 0;                              /* EOF */
+    }
     return (n < 0) ? -1 : (int)n;
 }
 
 int wiztoe_sendto(int fd, const void *buf, size_t len,
-                  const uint8_t ip[4], uint16_t port)
-{
-    if (!toe_fd_valid(fd) || !g_toe[fd].is_udp)
+    const uint8_t ip[4], uint16_t port) {
+    if (!toe_fd_valid(fd) || !g_toe[fd].is_udp) {
         return -1;
-    if (len > 0xFFFF)
+    }
+    if (len > 0xFFFF) {
         len = 0xFFFF;
+    }
 
-    if (!g_toe[fd].opened)
-    {
-        if (socket((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd)
+    if (!g_toe[fd].opened) {
+        if (socket((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd) {
             return -1;
+        }
         g_toe[fd].opened = 1;
     }
 
     int32_t n = sendto((uint8_t)fd, (uint8_t *)buf, (uint16_t)len,
-                       (uint8_t *)ip, port);
+        (uint8_t *)ip, port);
     return (n < 0) ? -1 : (int)n;
 }
 
-int wiztoe_recvfrom(int fd, void *buf, size_t len, uint8_t ip[4], uint16_t *port)
-{
-    if (!toe_fd_valid(fd) || !g_toe[fd].is_udp || !g_toe[fd].opened)
+int wiztoe_recvfrom(int fd, void *buf, size_t len, uint8_t ip[4], uint16_t *port) {
+    if (!toe_fd_valid(fd) || !g_toe[fd].is_udp || !g_toe[fd].opened) {
         return -1;
-    if (len > 0xFFFF)
+    }
+    if (len > 0xFFFF) {
         len = 0xFFFF;
+    }
 
     uint32_t t0 = toe_time_us();       /* wall clock, same reason as wiztoe_recv */
     for (;;)
     {
-        if (getSn_RX_RSR((uint8_t)fd) > 0)
+        if (getSn_RX_RSR((uint8_t)fd) > 0) {
             break;
-        if (getSn_SR((uint8_t)fd) != SOCK_UDP)
-        {
+        }
+        if (getSn_SR((uint8_t)fd) != SOCK_UDP) {
             /* Same two-transaction race as wiztoe_recv(): a datagram may have
              * landed between the RX_RSR read and this one. Drain first. */
-            if (getSn_RX_RSR((uint8_t)fd) > 0)
+            if (getSn_RX_RSR((uint8_t)fd) > 0) {
                 break;
+            }
             return -1;
         }
-        if (g_toe[fd].nonblock)
+        if (g_toe[fd].nonblock) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         if (g_toe[fd].rcv_timeout_ms &&
-            (toe_time_us() - t0) >= g_toe[fd].rcv_timeout_ms * 1000u)
+            (toe_time_us() - t0) >= g_toe[fd].rcv_timeout_ms * 1000u) {
             return WIZTOE_ERR_TIMEOUT;
+        }
         toe_yield_1ms();
     }
 
@@ -457,16 +471,13 @@ int wiztoe_recvfrom(int fd, void *buf, size_t len, uint8_t ip[4], uint16_t *port
     return (n < 0) ? -1 : (int)n;
 }
 
-void wiztoe_peer(int fd, uint8_t ip[4], uint16_t *port)
-{
-    if (!toe_fd_valid(fd))
-    {
+void wiztoe_peer(int fd, uint8_t ip[4], uint16_t *port) {
+    if (!toe_fd_valid(fd)) {
         memset(ip, 0, 4);
         *port = 0;
         return;
     }
-    if (g_toe[fd].is_udp)
-    {
+    if (g_toe[fd].is_udp) {
         memcpy(ip, g_toe[fd].dst_ip, 4);
         *port = g_toe[fd].dst_port;
         return;
@@ -475,11 +486,9 @@ void wiztoe_peer(int fd, uint8_t ip[4], uint16_t *port)
     *port = getSn_DPORT((uint8_t)fd);
 }
 
-void wiztoe_getsockname(int fd, uint8_t ip[4], uint16_t *port)
-{
+void wiztoe_getsockname(int fd, uint8_t ip[4], uint16_t *port) {
     wiz_NetInfo ni;
-    if (!toe_fd_valid(fd))
-    {
+    if (!toe_fd_valid(fd)) {
         memset(ip, 0, 4);
         *port = 0;
         return;
@@ -489,31 +498,26 @@ void wiztoe_getsockname(int fd, uint8_t ip[4], uint16_t *port)
     *port = g_toe[fd].port;
 }
 
-void wiztoe_local_ip(uint8_t ip[4])
-{
+void wiztoe_local_ip(uint8_t ip[4]) {
     wiz_NetInfo ni;
     ctlnetwork(CN_GET_NETINFO, (void *)&ni);
     memcpy(ip, ni.ip, 4);
 }
 
-void wiztoe_local_mac(uint8_t mac[6])
-{
+void wiztoe_local_mac(uint8_t mac[6]) {
     wiz_NetInfo ni;
     ctlnetwork(CN_GET_NETINFO, (void *)&ni);
     memcpy(mac, ni.mac, 6);
 }
 
-void wiztoe_reset_sockets(void)
-{
+void wiztoe_reset_sockets(void) {
     memset(g_toe, 0, sizeof(g_toe));
 }
 
-int wiztoe_socket_reserve(void)
-{
+int wiztoe_socket_reserve(void) {
     for (int sn = 0; sn < WIZTOE_MAX_SOCK; sn++)
     {
-        if (!g_toe[sn].used)
-        {
+        if (!g_toe[sn].used) {
             memset(&g_toe[sn], 0, sizeof(g_toe[sn]));
             g_toe[sn].used = 1;
             return sn;
@@ -522,10 +526,8 @@ int wiztoe_socket_reserve(void)
     return -1;
 }
 
-void wiztoe_socket_release(int sn)
-{
-    if (sn >= 0 && sn < WIZTOE_MAX_SOCK)
-    {
+void wiztoe_socket_release(int sn) {
+    if (sn >= 0 && sn < WIZTOE_MAX_SOCK) {
         close((uint8_t)sn);
         memset(&g_toe[sn], 0, sizeof(g_toe[sn]));
     }
@@ -547,16 +549,17 @@ void wiztoe_socket_release(int sn)
  * an abortive close once the deadline passes. */
 #define TOE_CLOSE_TIMEOUT_MS 1000
 
-static void toe_tcp_disconnect_if_connected(int fd)
-{
+static void toe_tcp_disconnect_if_connected(int fd) {
     uint8_t sr = getSn_SR((uint8_t)fd);
-    if (sr != SOCK_ESTABLISHED && sr != SOCK_CLOSE_WAIT)
+    if (sr != SOCK_ESTABLISHED && sr != SOCK_CLOSE_WAIT) {
         return;
+    }
 
     setSn_CR((uint8_t)fd, Sn_CR_DISCON);
-    while (getSn_CR((uint8_t)fd))
+    while (getSn_CR((uint8_t)fd)) {
         ;                         /* command latch, clears in microseconds */
 
+    }
     /* Wall-clock deadline. The old `waited < TOE_CLOSE_TIMEOUT_MS` counted loop
      * iterations as ms, but toe_yield_1ms() is a bare yield (see wiztoe_accept),
      * so 1000 iterations elapsed in ~75 ms, not the intended 1 s -- an abortive
@@ -564,35 +567,40 @@ static void toe_tcp_disconnect_if_connected(int fd)
     uint32_t t0 = toe_time_us();
     for (;;)
     {
-        if (getSn_SR((uint8_t)fd) == SOCK_CLOSED)
+        if (getSn_SR((uint8_t)fd) == SOCK_CLOSED) {
             return;               /* peer completed the 4-way close */
-        if (getSn_IR((uint8_t)fd) & Sn_IR_TIMEOUT)
+        }
+        if (getSn_IR((uint8_t)fd) & Sn_IR_TIMEOUT) {
             break;
-        if ((toe_time_us() - t0) >= TOE_CLOSE_TIMEOUT_MS * 1000u)
+        }
+        if ((toe_time_us() - t0) >= TOE_CLOSE_TIMEOUT_MS * 1000u) {
             break;
+        }
         toe_yield_1ms();
     }
 
     close((uint8_t)fd);           /* abortive: the graceful path did not finish */
 }
 
-int wiztoe_close(int fd)
-{
-    if (!toe_fd_valid(fd))
+int wiztoe_close(int fd) {
+    if (!toe_fd_valid(fd)) {
         return -1;
+    }
 
-    if (g_toe[fd].opened && !g_toe[fd].is_udp)
+    if (g_toe[fd].opened && !g_toe[fd].is_udp) {
         toe_tcp_disconnect_if_connected(fd);
-    if (g_toe[fd].opened)
+    }
+    if (g_toe[fd].opened) {
         close((uint8_t)fd);
+    }
     memset(&g_toe[fd], 0, sizeof(g_toe[fd]));
     return 0;
 }
 
-int wiztoe_get_settings(int fd, wiztoe_socket_settings_t *out)
-{
-    if (!toe_fd_valid(fd) || out == NULL)
+int wiztoe_get_settings(int fd, wiztoe_socket_settings_t *out) {
+    if (!toe_fd_valid(fd) || out == NULL) {
         return -1;
+    }
 
     out->port = g_toe[fd].port;
     out->nodelay = g_toe[fd].nodelay;
@@ -608,22 +616,22 @@ int wiztoe_get_settings(int fd, wiztoe_socket_settings_t *out)
     return 0;
 }
 
-int wiztoe_listen_with(const wiztoe_socket_settings_t *settings)
-{
-    if (settings == NULL)
+int wiztoe_listen_with(const wiztoe_socket_settings_t *settings) {
+    if (settings == NULL) {
         return -1;
+    }
 
     int fd = wiztoe_socket(0, 1 /* SOCK_STREAM */, 0);
-    if (fd < 0)
+    if (fd < 0) {
         return -1;                             /* every usable socket is taken */
 
+    }
     g_toe[fd].port = settings->port;
     g_toe[fd].nodelay = settings->nodelay;
     g_toe[fd].nonblock = settings->nonblock;
     g_toe[fd].rcv_timeout_ms = settings->rcv_timeout_ms;
     g_toe[fd].snd_timeout_ms = settings->snd_timeout_ms;
-    if (toe_listener_open(fd) < 0)
-    {
+    if (toe_listener_open(fd) < 0) {
         wiztoe_close(fd);
         return -1;
     }
@@ -633,63 +641,88 @@ int wiztoe_listen_with(const wiztoe_socket_settings_t *settings)
     return fd;
 }
 
-int wiztoe_setsockopt(int fd, wiztoe_opt_t opt, const void *val, size_t len)
-{
-    if (!toe_fd_valid(fd) || val == NULL || len == 0)
+int wiztoe_setsockopt(int fd, wiztoe_opt_t opt, const void *val, size_t len) {
+    if (!toe_fd_valid(fd) || val == NULL || len == 0) {
         return -1;
+    }
 
     int v = (len >= sizeof(int)) ? *(const int *)val : *(const uint8_t *)val;
 
     switch (opt)
     {
-    case WIZTOE_OPT_KEEPALIVE:
-        setSn_KPALVTR((uint8_t)fd, v ? 12 : 0);
-        return 0;
-    case WIZTOE_OPT_KEEPIDLE:
-        if (v < 5) v = 5;
-        if (v > 5 * 255) v = 5 * 255;
-        setSn_KPALVTR((uint8_t)fd, (uint8_t)(v / 5));
-        return 0;
-    case WIZTOE_OPT_NODELAY:
-        g_toe[fd].nodelay = (v != 0);
-        return 0;
-    case WIZTOE_OPT_TTL:
-        setSn_TTL((uint8_t)fd, (uint8_t)v);
-        return 0;
-    case WIZTOE_OPT_TOS:
-        setSn_TOS((uint8_t)fd, (uint8_t)v);
-        return 0;
-    case WIZTOE_OPT_RCVTIMEO_MS:
-        if (len < sizeof(uint32_t)) return -1;
-        g_toe[fd].rcv_timeout_ms = *(const uint32_t *)val;
-        return 0;
-    case WIZTOE_OPT_SNDTIMEO_MS:
-        if (len < sizeof(uint32_t)) return -1;
-        g_toe[fd].snd_timeout_ms = *(const uint32_t *)val;
-        return 0;
-    default:
-        return -1;
+        case WIZTOE_OPT_KEEPALIVE:
+            setSn_KPALVTR((uint8_t)fd, v ? 12 : 0);
+            return 0;
+        case WIZTOE_OPT_KEEPIDLE:
+            if (v < 5) {
+                v = 5;
+            }
+            if (v > 5 * 255) {
+                v = 5 * 255;
+            }
+            setSn_KPALVTR((uint8_t)fd, (uint8_t)(v / 5));
+            return 0;
+        case WIZTOE_OPT_NODELAY:
+            g_toe[fd].nodelay = (v != 0);
+            return 0;
+        case WIZTOE_OPT_TTL:
+            setSn_TTL((uint8_t)fd, (uint8_t)v);
+            return 0;
+        case WIZTOE_OPT_TOS:
+            setSn_TOS((uint8_t)fd, (uint8_t)v);
+            return 0;
+        case WIZTOE_OPT_RCVTIMEO_MS:
+            if (len < sizeof(uint32_t)) {
+                return -1;
+            }
+            g_toe[fd].rcv_timeout_ms = *(const uint32_t *)val;
+            return 0;
+        case WIZTOE_OPT_SNDTIMEO_MS:
+            if (len < sizeof(uint32_t)) {
+                return -1;
+            }
+            g_toe[fd].snd_timeout_ms = *(const uint32_t *)val;
+            return 0;
+        default:
+            return -1;
     }
 }
 
-int wiztoe_getsockopt(int fd, wiztoe_opt_t opt, void *val, size_t *len)
-{
-    if (!toe_fd_valid(fd) || val == NULL || len == NULL || *len < sizeof(int))
+int wiztoe_getsockopt(int fd, wiztoe_opt_t opt, void *val, size_t *len) {
+    if (!toe_fd_valid(fd) || val == NULL || len == NULL || *len < sizeof(int)) {
         return -1;
+    }
 
     int *out = (int *)val;
 
     switch (opt)
     {
-    case WIZTOE_OPT_ERROR:      *out = 0; break;
-    case WIZTOE_OPT_TYPE:       *out = g_toe[fd].is_udp ? 2 : 1; break;
-    case WIZTOE_OPT_RCVBUF:     *out = (int)getSn_RxMAX((uint8_t)fd); break;
-    case WIZTOE_OPT_SNDBUF:     *out = (int)getSn_TxMAX((uint8_t)fd); break;
-    case WIZTOE_OPT_TTL:        *out = (int)getSn_TTL((uint8_t)fd); break;
-    case WIZTOE_OPT_TOS:        *out = (int)getSn_TOS((uint8_t)fd); break;
-    case WIZTOE_OPT_RCVTIMEO_MS: *(uint32_t *)val = g_toe[fd].rcv_timeout_ms; break;
-    case WIZTOE_OPT_SNDTIMEO_MS: *(uint32_t *)val = g_toe[fd].snd_timeout_ms; break;
-    default: return -1;
+        case WIZTOE_OPT_ERROR:
+            *out = 0;
+            break;
+        case WIZTOE_OPT_TYPE:
+            *out = g_toe[fd].is_udp ? 2 : 1;
+            break;
+        case WIZTOE_OPT_RCVBUF:
+            *out = (int)getSn_RxMAX((uint8_t)fd);
+            break;
+        case WIZTOE_OPT_SNDBUF:
+            *out = (int)getSn_TxMAX((uint8_t)fd);
+            break;
+        case WIZTOE_OPT_TTL:
+            *out = (int)getSn_TTL((uint8_t)fd);
+            break;
+        case WIZTOE_OPT_TOS:
+            *out = (int)getSn_TOS((uint8_t)fd);
+            break;
+        case WIZTOE_OPT_RCVTIMEO_MS:
+            *(uint32_t *)val = g_toe[fd].rcv_timeout_ms;
+            break;
+        case WIZTOE_OPT_SNDTIMEO_MS:
+            *(uint32_t *)val = g_toe[fd].snd_timeout_ms;
+            break;
+        default:
+            return -1;
     }
     *len = sizeof(int);
     return 0;
