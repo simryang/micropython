@@ -15,7 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "wiznet_toe/Ethernet/wizchip_conf.h"
+#include "toe_iolibrary.h"
 
 // Rate the driver runs at until the machine.SPI object's baudrate seeds it
 // (network.WIZNET_TOE() does that on construction), and the rate the examples

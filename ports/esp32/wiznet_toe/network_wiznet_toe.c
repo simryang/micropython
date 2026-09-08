@@ -159,10 +159,9 @@ static mp_obj_t wiznet_toe_active(size_t n_args, const mp_obj_t *args) {
     if (n_args > 1) {
         if (mp_obj_is_true(args[1])) {
             if (!toe_net_is_up()) {
-                wiz_NetInfo info = {0};
-                toe_net_get_mac(info.mac);
-                info.dhcp = NETINFO_STATIC;
-                if (!toe_net_bringup(&info, &self->wiring)) {
+                uint8_t mac[6];
+                toe_net_get_mac(mac);
+                if (!toe_net_bringup(mac, &self->wiring)) {
                     mp_raise_OSError(MP_ENODEV);  // detail printed by bring-up
                 }
             }

@@ -11,9 +11,11 @@
 
 #include "esp_timer.h"
 
-#include "wiznet_toe/Internet/DHCP/dhcp.h"
-#include "wiznet_toe.h"
 #include "toe_port.h"
+#include "wiznet_toe.h"
+
+#include "toe_iolibrary.h"
+#include "wiznet_toe/Internet/DHCP/dhcp.h"
 
 // ioLibrary's RIP_MSG is 236 bytes of BOOTP header + 312 bytes of options.
 #define TOE_DHCP_BUF_SIZE 548

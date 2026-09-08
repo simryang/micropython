@@ -12,13 +12,13 @@
 #include <stdint.h>
 
 #include "toe_spi_port.h"
-#include "wiznet_toe/Ethernet/wizchip_conf.h"
 
-// Brings up SPI + chip hardware TCP/IP with the given identity, on the given
-// wiring. Re-callable: every call resets the chip and reapplies, so it doubles
-// as "start over from a clean chip". Returns false (with a printed reason) on
+// Brings up SPI + chip hardware TCP/IP on the given wiring, with the given MAC
+// and a 0.0.0.0 address (ifconfig() or DHCP supplies the real one later).
+// Re-callable: every call resets the chip and reapplies, so it doubles as
+// "start over from a clean chip". Returns false (with a printed reason) on
 // failure.
-bool toe_net_bringup(const wiz_NetInfo *net_info, const toe_spi_port_config_t *wiring);
+bool toe_net_bringup(const uint8_t mac[6], const toe_spi_port_config_t *wiring);
 
 // True once toe_net_bringup() has succeeded.
 bool toe_net_is_up(void);

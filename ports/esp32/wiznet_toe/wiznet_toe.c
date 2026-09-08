@@ -20,7 +20,7 @@
  */
 #include <string.h>
 
-#include "wizchip_conf.h"
+#include "toe_iolibrary.h"
 #include "socket.h"            /* ioLibrary socket API (hardware sockets) */
 
 /* Declared here rather than including toe_net_bringup.h: that header pulls in

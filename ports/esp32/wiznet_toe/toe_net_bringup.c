@@ -13,12 +13,12 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 
-#include "toe_spi_port.h"
-#include "wiznet_toe/Ethernet/W5500/w5500.h"
-
 #include "toe_socket_backend.h"
+#include "toe_spi_port.h"
 #include "toe_vfs.h"
 #include "wiznet_toe.h"
+
+#include "toe_iolibrary.h"
 
 // Per-socket buffer sizes (KB). The W5500 has 16KB of TX and 16KB of RX
 // buffer to divide among its 8 sockets, so size and socket count trade off
@@ -156,7 +156,13 @@ void toe_net_shutdown(void) {
     s_net_up = false;
 }
 
-bool toe_net_bringup(const wiz_NetInfo *net_info, const toe_spi_port_config_t *wiring) {
+bool toe_net_bringup(const uint8_t mac[6], const toe_spi_port_config_t *wiring) {
+    // Identity to hand the chip: the MAC, and no address yet.
+    wiz_NetInfo net_info_storage = {0};
+    memcpy(net_info_storage.mac, mac, 6);
+    net_info_storage.dhcp = NETINFO_STATIC;
+    const wiz_NetInfo *net_info = &net_info_storage;
+
     // esp_netif_init() is idempotent in ESP-IDF (safe if network.LAN/WLAN
     // already called it). The default event loop is already created
     // unconditionally in main.c before the MicroPython task starts, so we
