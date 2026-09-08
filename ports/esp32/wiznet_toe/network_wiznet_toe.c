@@ -7,7 +7,9 @@
 // from an esp_netif. See docs/ARCHITECTURE_TOE.md.
 //
 //   import network
-//   nic = network.WIZNET_TOE()
+//   from machine import Pin, SPI
+//   spi = SPI(1, baudrate=20_000_000, sck=Pin(12), mosi=Pin(11), miso=Pin(13))
+//   nic = network.WIZNET_TOE(spi=spi, cs=Pin(10), reset=Pin(9))
 //   nic.active(True)
 //   nic.ifconfig(('192.168.7.23', '255.255.255.0', '192.168.7.1', '8.8.8.8'))
 //   nic.isconnected()
@@ -15,6 +17,7 @@
 #include <string.h>
 
 #include "py/mperrno.h"
+#include "py/mphal.h"
 #include "py/objtuple.h"
 #include "py/runtime.h"
 
@@ -31,12 +34,16 @@
 
 typedef struct _wiznet_toe_obj_t {
     mp_obj_base_t base;
+    // How the chip is wired, from the constructor.  Kept as plain numbers,
+    // the way network.LAN keeps its pins, so nothing here is a GC root.
+    toe_spi_port_config_t wiring;
+    bool wired;
 } wiznet_toe_obj_t;
 
 const mp_obj_type_t network_wiznet_toe_type;
 
 // Single chip on the board -> single object, like network.LAN.
-static const wiznet_toe_obj_t wiznet_toe_obj = { { &network_wiznet_toe_type } };
+static wiznet_toe_obj_t wiznet_toe_obj = { { &network_wiznet_toe_type } };
 
 static void parse_ipv4_str(mp_obj_t obj, uint8_t out[4]) {
     size_t len;
@@ -71,23 +78,61 @@ static mp_obj_t format_ipv4_str(const uint8_t ip[4]) {
     return mp_obj_new_str(buf, (size_t)n);
 }
 
+// WIZNET_TOE(spi=machine.SPI, cs=Pin, reset=Pin)
+//
+// The wiring comes in the shape network.LAN takes for its SPI PHYs: an
+// initialised machine.SPI object whose bus the chip hangs off, plus the pins
+// this driver drives itself.  The SPI object's baudrate is the clock the
+// chip is driven at.  Once wired, a call with no arguments returns the same
+// object, so a script can reach a running interface without repeating the
+// wiring.
 static mp_obj_t wiznet_toe_make_new(const mp_obj_type_t *type, size_t n_args,
-    size_t n_kw, const mp_obj_t *args) {
-    mp_arg_check_num(n_args, n_kw, 0, 0, false);
-    return MP_OBJ_FROM_PTR(&wiznet_toe_obj);
+    size_t n_kw, const mp_obj_t *all_args) {
+    wiznet_toe_obj_t *self = &wiznet_toe_obj;
+    if (n_args == 0 && n_kw == 0 && self->wired) {
+        return MP_OBJ_FROM_PTR(self);
+    }
+
+    enum { ARG_spi, ARG_cs, ARG_reset };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_spi, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
+        { MP_QSTR_cs, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
+        { MP_QSTR_reset, MP_ARG_KW_ONLY | MP_ARG_REQUIRED | MP_ARG_OBJ },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    toe_spi_port_config_t wiring = {
+        .host = machine_hw_spi_get_host(args[ARG_spi].u_obj),
+        .cs_pin = machine_pin_get_id(args[ARG_cs].u_obj),
+        .reset_pin = machine_pin_get_id(args[ARG_reset].u_obj),
+    };
+    bool rewired = wiring.host != self->wiring.host
+        || wiring.cs_pin != self->wiring.cs_pin
+        || wiring.reset_pin != self->wiring.reset_pin;
+    if (rewired && toe_net_is_up()) {
+        mp_raise_ValueError(MP_ERROR_TEXT("can't rewire while active"));
+    }
+    if (!toe_spi_port_set_clock(machine_hw_spi_get_baudrate(args[ARG_spi].u_obj))) {
+        mp_raise_ValueError(MP_ERROR_TEXT("SPI baudrate out of range"));
+    }
+    self->wiring = wiring;
+    self->wired = true;
+    return MP_OBJ_FROM_PTR(self);
 }
 
 // active(True) brings the chip up with a placeholder 0.0.0.0 identity; the
 // real address is applied by ifconfig(). That mirrors how network.LAN starts
 // before DHCP has produced an address.
 static mp_obj_t wiznet_toe_active(size_t n_args, const mp_obj_t *args) {
+    wiznet_toe_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     if (n_args > 1) {
         if (mp_obj_is_true(args[1])) {
             if (!toe_net_is_up()) {
                 wiz_NetInfo info = {0};
                 toe_net_get_mac(info.mac);
                 info.dhcp = NETINFO_STATIC;
-                if (!toe_net_bringup(&info)) {
+                if (!toe_net_bringup(&info, &self->wiring)) {
                     mp_raise_OSError(MP_ENODEV);  // detail printed by bring-up
                 }
             }
@@ -228,8 +273,9 @@ static mp_obj_t wiznet_toe_config(size_t n_args, const mp_obj_t *args, mp_map_t 
                     break;
                 }
                 case MP_QSTR_spi_hz: {
-                    // Settable at runtime so the safe bring-up rate is what
-                    // boots and a faster rate can be swept without reflashing.
+                    // The SPI object's baudrate seeds the clock; this lets a
+                    // faster rate be swept at runtime without rebuilding the
+                    // SPI object.
                     mp_int_t hz = mp_obj_get_int(kwargs->table[i].value);
                     if (hz <= 0 || !toe_spi_port_set_clock((uint32_t)hz)) {
                         mp_raise_ValueError(MP_ERROR_TEXT("bad spi_hz"));

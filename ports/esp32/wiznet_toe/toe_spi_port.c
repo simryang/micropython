@@ -1,39 +1,46 @@
 // wiznet_toe SPI/GPIO glue for the W5500 TOE port.
 // Implements the cris/cs/spi(burst) callbacks that ioLibrary_Driver's
 // wizchip_conf.c needs, on top of ESP-IDF's spi_master driver.
+//
+// The bus itself belongs to the machine.SPI object the user hands to
+// network.WIZNET_TOE(); this file adds the chip as one more device on it and
+// drives CS and RESET by hand.
 
 #include "toe_spi_port.h"
 
 #include <stdio.h>
 
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "wiznet_toe/Ethernet/wizchip_conf.h"
 
-#define TOE_PIN_SCK  12
-#define TOE_PIN_MOSI 11
-#define TOE_PIN_MISO 13
-#define TOE_PIN_CS   10
-#define TOE_PIN_INT  14
-#define TOE_PIN_RST  9
-
-#define TOE_SPI_HOST SPI2_HOST
-// Swept on real hardware 1..40 MHz: every rate read VERSIONR and the identity
-// registers back correctly, so the original 1 MHz bring-up value was treating
-// the wrong suspect -- the reset pulse width was what fixed the dead reads,
-// not the clock. TCP receive throughput rises to ~10 MHz (77 -> 204 KB/s at a
-// 2KB read) and is flat above it, so 20 MHz sits past the knee while keeping
-// signal-integrity margin over the 40 MHz that also tested clean.
+// Rate the driver runs at until the machine.SPI object's baudrate seeds it
+// (network.WIZNET_TOE() does that on construction), and the rate the examples
+// ask for.  Swept on real hardware 1..40 MHz: every rate read VERSIONR and the
+// identity registers back correctly, so the original 1 MHz bring-up value was
+// treating the wrong suspect -- the reset pulse width was what fixed the dead
+// reads, not the clock. TCP receive throughput rises to ~10 MHz (77 -> 204 KB/s
+// at a 2KB read) and is flat above it, so 20 MHz sits past the knee while
+// keeping signal-integrity margin over the 40 MHz that also tested clean.
 // Still runtime-settable via config(spi_hz=...).
 #define TOE_SPI_CLOCK_HZ (20 * 1000 * 1000)
 
 #define TOE_SPI_CLOCK_MIN_HZ (100 * 1000)
 #define TOE_SPI_CLOCK_MAX_HZ (80 * 1000 * 1000)  // W5500 datasheet ceiling
 
+// Longest single transaction the bus takes.  machine.SPI sets the bus up with
+// max_transfer_sz at its default, which with DMA is SPI_MAX_DMA_LEN, while a
+// burst can be a whole socket buffer -- up to 16 KB at sock_kb=16.  So bursts
+// are carried in transactions of at most this size.  ioLibrary holds CS low
+// around the entire burst and the W5500 keeps auto-incrementing the address
+// for as long as CS stays low, so the chip sees one frame however many
+// transactions carry it.
+#define TOE_SPI_TRANSACTION_MAX SPI_MAX_DMA_LEN
+
+static toe_spi_port_config_t s_wiring;
 static spi_device_handle_t s_spi_dev;
 static bool s_initted = false;
 static uint32_t s_clock_hz = TOE_SPI_CLOCK_HZ;
@@ -51,11 +58,11 @@ static void toe_cris_exit(void) {
 }
 
 static void toe_cs_select(void) {
-    gpio_set_level(TOE_PIN_CS, 0);
+    gpio_set_level(s_wiring.cs_pin, 0);
 }
 
 static void toe_cs_deselect(void) {
-    gpio_set_level(TOE_PIN_CS, 1);
+    gpio_set_level(s_wiring.cs_pin, 1);
 }
 
 // A failed transfer must never pass for a good one. spi_device_polling_transmit
@@ -66,8 +73,9 @@ static void toe_cs_deselect(void) {
 // entirely wrong bytes. That is what the long-unexplained "sock_kb=8 data
 // corruption" was. The boundary measured exactly at SPI_MAX_DMA_LEN: a 4092-byte
 // read is clean, 4093 corrupts. Evidence: buildC_burst_limit.log under
-// D:/esp32s3-lab/debug/toe-select-tick. Bus setup now raises max_transfer_sz,
-// and this check makes any future overrun loud instead of silent.
+// D:/esp32s3-lab/debug/toe-select-tick. Bursts are now split at that limit
+// (TOE_SPI_TRANSACTION_MAX), and this check makes any future overrun loud
+// instead of silent.
 static void toe_spi_checked(esp_err_t err, const char *what, uint32_t len) {
     if (err != ESP_OK) {
         printf("wiznettoe: SPI %s of %u bytes failed: %s\n",
@@ -76,28 +84,32 @@ static void toe_spi_checked(esp_err_t err, const char *what, uint32_t len) {
 }
 
 static void toe_spi_read_burst(uint8_t *buf, uint16_t len) {
-    if (len == 0) {
-        return;
+    while (len > 0) {
+        uint16_t n = len > TOE_SPI_TRANSACTION_MAX ? TOE_SPI_TRANSACTION_MAX : len;
+        spi_transaction_t t = {
+            .length = (size_t)n * 8,
+            .rxlength = (size_t)n * 8,
+            .tx_buffer = NULL,
+            .rx_buffer = buf,
+        };
+        toe_spi_checked(spi_device_polling_transmit(s_spi_dev, &t), "read burst", n);
+        buf += n;
+        len -= n;
     }
-    spi_transaction_t t = {
-        .length = (size_t)len * 8,
-        .rxlength = (size_t)len * 8,
-        .tx_buffer = NULL,
-        .rx_buffer = buf,
-    };
-    toe_spi_checked(spi_device_polling_transmit(s_spi_dev, &t), "read burst", len);
 }
 
 static void toe_spi_write_burst(uint8_t *buf, uint16_t len) {
-    if (len == 0) {
-        return;
+    while (len > 0) {
+        uint16_t n = len > TOE_SPI_TRANSACTION_MAX ? TOE_SPI_TRANSACTION_MAX : len;
+        spi_transaction_t t = {
+            .length = (size_t)n * 8,
+            .tx_buffer = buf,
+            .rx_buffer = NULL,
+        };
+        toe_spi_checked(spi_device_polling_transmit(s_spi_dev, &t), "write burst", n);
+        buf += n;
+        len -= n;
     }
-    spi_transaction_t t = {
-        .length = (size_t)len * 8,
-        .tx_buffer = buf,
-        .rx_buffer = NULL,
-    };
-    toe_spi_checked(spi_device_polling_transmit(s_spi_dev, &t), "write burst", len);
 }
 
 // WIZCHIP_READ() (w5500.c) always reads its single data byte through
@@ -143,6 +155,24 @@ uint32_t toe_spi_port_actual_clock(void) {
     return (uint32_t)khz * 1000u;
 }
 
+// Adds the chip to the wiring's bus at the given clock.  CS is driven by the
+// wizchip cs_sel/cs_desel callbacks, not by the peripheral, because one
+// W5500 frame spans several transactions.
+static bool toe_spi_add_device(uint32_t hz) {
+    spi_device_interface_config_t dev_conf = {
+        .clock_speed_hz = (int)hz,
+        .mode = 0,
+        .spics_io_num = -1,
+        .queue_size = 1,
+    };
+    esp_err_t err = spi_bus_add_device(s_wiring.host, &dev_conf, &s_spi_dev);
+    if (err != ESP_OK) {
+        printf("wiznettoe: spi_bus_add_device failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
 // Re-adds the SPI device at a new clock. Before init it just records the rate.
 // On failure the previous rate is restored so the chip stays reachable --
 // otherwise a bad rate would leave no device handle and no way back.
@@ -157,20 +187,11 @@ bool toe_spi_port_set_clock(uint32_t hz) {
     if (spi_bus_remove_device(s_spi_dev) != ESP_OK) {
         return false;
     }
-
-    spi_device_interface_config_t dev_conf = {
-        .clock_speed_hz = (int)hz,
-        .mode = 0,
-        .spics_io_num = -1,
-        .queue_size = 1,
-    };
-    if (spi_bus_add_device(TOE_SPI_HOST, &dev_conf, &s_spi_dev) == ESP_OK) {
+    if (toe_spi_add_device(hz)) {
         s_clock_hz = hz;
         return true;
     }
-
-    dev_conf.clock_speed_hz = (int)s_clock_hz;
-    if (spi_bus_add_device(TOE_SPI_HOST, &dev_conf, &s_spi_dev) != ESP_OK) {
+    if (!toe_spi_add_device(s_clock_hz)) {
         printf("wiznettoe: SPI device lost while restoring %u Hz\n", (unsigned)s_clock_hz);
         s_initted = false;
     }
@@ -181,70 +202,49 @@ void toe_spi_port_hold_reset(void) {
     if (!s_initted) {
         return;
     }
-    gpio_set_level(TOE_PIN_RST, 0);
+    gpio_set_level(s_wiring.reset_pin, 0);
 }
 
 void toe_spi_port_reset(void) {
-    gpio_set_level(TOE_PIN_RST, 0);
+    if (!s_initted) {
+        return;
+    }
+    gpio_set_level(s_wiring.reset_pin, 0);
     vTaskDelay(pdMS_TO_TICKS(10));  // generous margin over datasheet's 500ns min pulse
-    gpio_set_level(TOE_PIN_RST, 1);
+    gpio_set_level(s_wiring.reset_pin, 1);
     vTaskDelay(pdMS_TO_TICKS(50));  // generous margin over datasheet's ~2ms PLL lock time
 }
 
-bool toe_spi_port_init(void) {
+static bool toe_wiring_equal(const toe_spi_port_config_t *a, const toe_spi_port_config_t *b) {
+    return a->host == b->host && a->cs_pin == b->cs_pin && a->reset_pin == b->reset_pin;
+}
+
+bool toe_spi_port_init(const toe_spi_port_config_t *wiring) {
     if (s_initted) {
-        return true;
+        if (toe_wiring_equal(&s_wiring, wiring)) {
+            return true;
+        }
+        // Rewired while the interface was down: give the old bus and pins
+        // back before taking the new ones.
+        spi_bus_remove_device(s_spi_dev);
+        gpio_reset_pin(s_wiring.cs_pin);
+        gpio_reset_pin(s_wiring.reset_pin);
+        s_initted = false;
     }
+    s_wiring = *wiring;
 
     gpio_config_t cs_rst_conf = {
-        .pin_bit_mask = (1ULL << TOE_PIN_CS) | (1ULL << TOE_PIN_RST),
+        .pin_bit_mask = (1ULL << s_wiring.cs_pin) | (1ULL << s_wiring.reset_pin),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&cs_rst_conf);
-    gpio_set_level(TOE_PIN_CS, 1);
-    gpio_set_level(TOE_PIN_RST, 1);
+    gpio_set_level(s_wiring.cs_pin, 1);
+    gpio_set_level(s_wiring.reset_pin, 1);
 
-    gpio_config_t int_conf = {
-        .pin_bit_mask = (1ULL << TOE_PIN_INT),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,  // polled for now; switch to edge-irq once socket layer lands
-    };
-    gpio_config(&int_conf);
-
-    spi_bus_config_t bus_conf = {
-        .sclk_io_num = TOE_PIN_SCK,
-        .mosi_io_num = TOE_PIN_MOSI,
-        .miso_io_num = TOE_PIN_MISO,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        // 0 would mean SPI_MAX_DMA_LEN (4092) with DMA enabled, and a socket
-        // buffer can hand us a burst as large as the whole buffer -- up to
-        // 16 KB at sock_kb=16. Anything past 4092 was rejected and silently
-        // moved nothing (see toe_spi_checked). Size this to the largest burst
-        // the chip's 16 KB RX/TX buffers can produce.
-        .max_transfer_sz = 16 * 1024,
-    };
-    esp_err_t err = spi_bus_initialize(TOE_SPI_HOST, &bus_conf, SPI_DMA_CH_AUTO);
-    if (err != ESP_OK) {
-        printf("wiznettoe: spi_bus_initialize failed: %s\n", esp_err_to_name(err));
-        return false;
-    }
-
-    spi_device_interface_config_t dev_conf = {
-        .clock_speed_hz = (int)s_clock_hz,
-        .mode = 0,
-        .spics_io_num = -1,  // CS is driven manually via wizchip cs_sel/cs_desel callbacks
-        .queue_size = 1,
-    };
-    err = spi_bus_add_device(TOE_SPI_HOST, &dev_conf, &s_spi_dev);
-    if (err != ESP_OK) {
-        printf("wiznettoe: spi_bus_add_device failed: %s\n", esp_err_to_name(err));
-        spi_bus_free(TOE_SPI_HOST);
+    if (!toe_spi_add_device(s_clock_hz)) {
         return false;
     }
 

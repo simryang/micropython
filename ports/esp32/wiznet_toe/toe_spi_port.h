@@ -1,7 +1,8 @@
 // wiznet_toe SPI/GPIO glue for the W5500 TOE port.
-// Pins are confirmed against the real ESP32-W5500-Dev-V1 schematic
-// (same pins already verified working in the MACRAW guide):
-// SCK=12 MOSI=11 MISO=13 CS=10 INT=14 RESET=9
+//
+// The SPI bus belongs to the machine.SPI object the user passes to
+// network.WIZNET_TOE(); this file only adds the chip as a device on that
+// bus and drives the CS and RESET pins itself.
 
 #ifndef MICROPY_INCLUDED_ESP32_WIZNET_TOE_SPI_PORT_H
 #define MICROPY_INCLUDED_ESP32_WIZNET_TOE_SPI_PORT_H
@@ -9,10 +10,23 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Initializes SPI bus + CS/RESET/INT GPIOs and registers the wizchip
-// cris/cs/spi(burst) callbacks with ioLibrary_Driver. Safe to call once.
-// Returns false (and logs the esp_err_t) if the SPI bus/device init fails.
-bool toe_spi_port_init(void);
+#include "driver/spi_master.h"
+
+// How the chip is wired: the host of an initialised SPI bus and the two
+// GPIOs the driver toggles.  CS is driven by software rather than by the
+// SPI peripheral because ioLibrary holds it low across several transactions
+// to make one W5500 frame.
+typedef struct _toe_spi_port_config_t {
+    spi_host_device_t host;
+    int cs_pin;
+    int reset_pin;
+} toe_spi_port_config_t;
+
+// Adds the chip as a device on the wiring's bus, sets up the CS/RESET GPIOs
+// and registers the cris/cs/spi(burst) callbacks with ioLibrary_Driver.
+// Calling it again with the same wiring is a no-op; with different wiring it
+// moves the device.  Returns false (and logs the esp_err_t) on failure.
+bool toe_spi_port_init(const toe_spi_port_config_t *wiring);
 
 // Hardware-resets the W5500 via the RESET pin (active low, per datasheet).
 void toe_spi_port_reset(void);
@@ -21,10 +35,11 @@ void toe_spi_port_reset(void);
 // Used by active(False); the next toe_spi_port_reset() releases it.
 void toe_spi_port_hold_reset(void);
 
-// SPI clock, in Hz. The compiled-in default is the conservative bring-up rate;
-// set_clock() re-adds the SPI device so the rate can be swept at runtime
-// without reflashing. Returns false (and keeps the old rate) if the value is
-// out of range or the device could not be re-added.
+// SPI clock, in Hz.  Seeded from the machine.SPI object's baudrate when the
+// interface object is constructed; set_clock() re-adds the SPI device so the
+// rate can be swept at runtime (config(spi_hz=...)) without rebuilding the
+// SPI object.  Returns false (and keeps the old rate) if the value is out of
+// range or the device could not be re-added.
 uint32_t toe_spi_port_get_clock(void);
 bool toe_spi_port_set_clock(uint32_t hz);
 

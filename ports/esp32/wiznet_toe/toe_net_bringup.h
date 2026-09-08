@@ -11,12 +11,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "toe_spi_port.h"
 #include "wiznet_toe/Ethernet/wizchip_conf.h"
 
-// Brings up SPI + chip hardware TCP/IP with the given identity. Re-callable:
-// every call resets the chip and reapplies, so it doubles as "start over from
-// a clean chip". Returns false (with a printed reason) on failure.
-bool toe_net_bringup(const wiz_NetInfo *net_info);
+// Brings up SPI + chip hardware TCP/IP with the given identity, on the given
+// wiring. Re-callable: every call resets the chip and reapplies, so it doubles
+// as "start over from a clean chip". Returns false (with a printed reason) on
+// failure.
+bool toe_net_bringup(const wiz_NetInfo *net_info, const toe_spi_port_config_t *wiring);
 
 // True once toe_net_bringup() has succeeded.
 bool toe_net_is_up(void);

@@ -156,7 +156,7 @@ void toe_net_shutdown(void) {
     s_net_up = false;
 }
 
-bool toe_net_bringup(const wiz_NetInfo *net_info) {
+bool toe_net_bringup(const wiz_NetInfo *net_info, const toe_spi_port_config_t *wiring) {
     // esp_netif_init() is idempotent in ESP-IDF (safe if network.LAN/WLAN
     // already called it). The default event loop is already created
     // unconditionally in main.c before the MicroPython task starts, so we
@@ -194,7 +194,7 @@ bool toe_net_bringup(const wiz_NetInfo *net_info) {
     ip.gw.addr = ESP_IP4TOADDR(net_info->gw[0], net_info->gw[1], net_info->gw[2], net_info->gw[3]);
     esp_netif_set_ip_info(s_shadow, &ip);
 
-    if (!toe_spi_port_init()) {
+    if (!toe_spi_port_init(wiring)) {
         return false;  // reason already printed by toe_spi_port_init
     }
     toe_spi_port_reset();
