@@ -30,14 +30,16 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
 // A socket backend is the TCP/IP stack that implements a socket's calls:
 // lwIP, or a stack running inside a network interface chip.  The socket
 // module drives every socket through its backend's table instead of calling
 // lwIP directly, so such an interface can provide sockets as well.  The
-// entries mirror the lwIP and POSIX socket calls: each one takes the
+// socket entries mirror the lwIP and POSIX socket calls: each one takes the
 // descriptor returned by socket() and returns -1 with errno set on failure.
+// The resolver entries mirror lwip_getaddrinfo() and lwip_freeaddrinfo().
 //
 // A backend must register its descriptors with the ESP-IDF VFS, because the
 // socket module relies on select() for polling and timeouts and select()
@@ -59,6 +61,14 @@ typedef struct _socket_backend_t {
     // mreq holds the group address followed by the interface address, each 4
     // bytes in network byte order, like struct ip_mreq.
     int (*join_multicast_group)(int s, const uint8_t *mreq);
+    // Name resolution, with the contract of lwip_getaddrinfo(): returns 0
+    // and a result list, or an EAI_* code.  A result is released by the
+    // freeaddrinfo of the backend that produced it.  A socket resolves its
+    // bind() and connect() addresses with its own backend, since that is
+    // the stack the address is used on; socket.getaddrinfo() uses the
+    // default backend, the one a new socket would get.
+    int (*getaddrinfo)(const char *nodename, const char *servname, const struct addrinfo *hints, struct addrinfo **res);
+    void (*freeaddrinfo)(struct addrinfo *ai);
 } socket_backend_t;
 
 // lwIP, the backend of the WLAN, LAN and PPP interfaces.

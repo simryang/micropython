@@ -24,6 +24,7 @@
 #include <sys/time.h>
 #include <unistd.h>       // close() -- see toe_backend_close
 
+#include "lwip/netdb.h"   // lwip_getaddrinfo(), lwip_freeaddrinfo()
 #include "lwip/sockets.h" // struct sockaddr_in, lwip_htons/htonl
 
 #include "toe_port.h"     // toe_yield_1ms(), toe_time_us()
@@ -523,4 +524,8 @@ const socket_backend_t socket_backend_wiznet_toe = {
     .recvfrom = toe_backend_recvfrom,
     .sendto = toe_backend_sendto,
     .join_multicast_group = toe_backend_join_multicast_group,
+    // Still lwIP's resolver: the linker wrap in toe_dns_wrap.c redirects
+    // it to the chip's DNS client while the interface is up.
+    .getaddrinfo = lwip_getaddrinfo,
+    .freeaddrinfo = lwip_freeaddrinfo,
 };

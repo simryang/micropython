@@ -118,6 +118,8 @@ const socket_backend_t socket_backend_lwip = {
     .recvfrom = lwip_recvfrom,
     .sendto = lwip_sendto,
     .join_multicast_group = socket_backend_lwip_join_multicast_group,
+    .getaddrinfo = lwip_getaddrinfo,
+    .freeaddrinfo = lwip_freeaddrinfo,
 };
 
 static const socket_backend_t *socket_backend_default = &socket_backend_lwip;
@@ -253,7 +255,7 @@ static int mdns_getaddrinfo(const char *host_str, const char *port_str,
 }
 #endif // MICROPY_HW_ENABLE_MDNS_QUERIES
 
-static void _getaddrinfo_inner(const mp_obj_t host, const mp_obj_t portx,
+static void _getaddrinfo_inner(const socket_backend_t *backend, const mp_obj_t host, const mp_obj_t portx,
     struct addrinfo *hints, struct addrinfo **res) {
     int retval = 0;
 
@@ -285,7 +287,7 @@ static void _getaddrinfo_inner(const mp_obj_t host, const mp_obj_t portx,
 
     if (retval == 0 && *res == NULL) {
         // Normal query
-        retval = lwip_getaddrinfo(host_str, port_str, hints, res);
+        retval = backend->getaddrinfo(host_str, port_str, hints, res);
     }
 
     MP_THREAD_GIL_ENTER();
@@ -298,18 +300,18 @@ static void _getaddrinfo_inner(const mp_obj_t host, const mp_obj_t portx,
     // as netconn_gethostbyname_addrtype returning OK instead of error.
     if (*res == NULL ||
         (strcmp(res[0]->ai_canonname, "0.0.0.0") == 0 && strcmp(host_str, "0.0.0.0") != 0)) {
-        lwip_freeaddrinfo(*res);
+        backend->freeaddrinfo(*res);
         mp_raise_OSError(-2); // name or service not known
     }
 
     assert(retval == 0 && *res != NULL);
 }
 
-static void _socket_getaddrinfo(const mp_obj_t addrtuple, struct addrinfo **resp) {
+static void _socket_getaddrinfo(const socket_backend_t *backend, const mp_obj_t addrtuple, struct addrinfo **resp) {
     mp_obj_t *elem;
     mp_obj_get_array_fixed_n(addrtuple, 2, &elem);
     struct addrinfo hints = { 0 };
-    _getaddrinfo_inner(elem[0], elem[1], &hints, resp);
+    _getaddrinfo_inner(backend, elem[0], elem[1], &hints, resp);
 }
 
 static mp_obj_t socket_make_new(const mp_obj_type_t *type_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
@@ -351,10 +353,10 @@ static mp_obj_t socket_make_new(const mp_obj_type_t *type_in, size_t n_args, siz
 static mp_obj_t socket_bind(const mp_obj_t arg0, const mp_obj_t arg1) {
     socket_obj_t *self = MP_OBJ_TO_PTR(arg0);
     struct addrinfo *res;
-    _socket_getaddrinfo(arg1, &res);
+    _socket_getaddrinfo(self->backend, arg1, &res);
     self->state = SOCKET_STATE_CONNECTED;
     int r = self->backend->bind(self->fd, res->ai_addr, res->ai_addrlen);
-    lwip_freeaddrinfo(res);
+    self->backend->freeaddrinfo(res);
     if (r < 0) {
         mp_raise_OSError(errno);
     }
@@ -436,7 +438,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
     int flags;
     int raise_err = 0;
 
-    _socket_getaddrinfo(arg1, &res);
+    _socket_getaddrinfo(self->backend, arg1, &res);
     MP_THREAD_GIL_EXIT();
     self->state = SOCKET_STATE_CONNECTED;
 
@@ -477,7 +479,7 @@ static mp_obj_t socket_connect(const mp_obj_t arg0, const mp_obj_t arg1) {
         }
     }
 
-    lwip_freeaddrinfo(res);
+    self->backend->freeaddrinfo(res);
 
     if (blocking && raise_err == EINPROGRESS) {
         // Keep calling select() until the socket is marked writable (i.e. connected),
@@ -967,6 +969,8 @@ static MP_DEFINE_CONST_OBJ_TYPE(
     );
 
 static mp_obj_t esp_socket_getaddrinfo(size_t n_args, const mp_obj_t *args) {
+    // Resolve and free with the same backend: the one a new socket gets.
+    const socket_backend_t *backend = socket_backend_default;
     struct addrinfo hints = { };
     struct addrinfo *res = NULL;
 
@@ -992,7 +996,7 @@ static mp_obj_t esp_socket_getaddrinfo(size_t n_args, const mp_obj_t *args) {
         hints.ai_flags = mp_obj_get_int(args[5]);
     }
 
-    _getaddrinfo_inner(args[0], args[1], &hints, &res);
+    _getaddrinfo_inner(backend, args[0], args[1], &hints, &res);
     mp_obj_t ret_list = mp_obj_new_list(0, NULL);
 
     for (struct addrinfo *resi = res; resi; resi = resi->ai_next) {
@@ -1019,7 +1023,7 @@ static mp_obj_t esp_socket_getaddrinfo(size_t n_args, const mp_obj_t *args) {
         mp_obj_list_append(ret_list, mp_obj_new_tuple(5, addrinfo_objs));
     }
 
-    lwip_freeaddrinfo(res);
+    backend->freeaddrinfo(res);
     return ret_list;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(esp_socket_getaddrinfo_obj, 2, 6, esp_socket_getaddrinfo);
