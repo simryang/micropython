@@ -411,6 +411,9 @@ static mp_obj_t get_lan(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_ar
 
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     self->base.netif = esp_netif_new(&cfg);
+    if (self->base.netif == NULL) {
+        mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("esp_netif_new failed"));
+    }
 
     if (esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL) != ESP_OK) {
         mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("esp_event_handler_register failed"));
