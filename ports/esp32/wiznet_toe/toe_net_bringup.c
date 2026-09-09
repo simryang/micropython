@@ -69,7 +69,6 @@ bool toe_net_set_bufkb(uint8_t tx_kb, uint8_t rx_kb) {
 }
 
 static bool s_net_up;
-static esp_netif_t *s_shadow;
 static uint8_t s_mac[6];
 static bool s_mac_set;
 
@@ -115,17 +114,6 @@ bool toe_net_link_up(void) {
     return (getPHYCFGR() & PHYCFGR_LNK_ON) != 0;
 }
 
-static void toe_net_sync_shadow(const uint8_t ip[4], const uint8_t sn[4], const uint8_t gw[4]) {
-    if (!s_shadow) {
-        return;
-    }
-    esp_netif_ip_info_t info = {0};
-    info.ip.addr = ESP_IP4TOADDR(ip[0], ip[1], ip[2], ip[3]);
-    info.netmask.addr = ESP_IP4TOADDR(sn[0], sn[1], sn[2], sn[3]);
-    info.gw.addr = ESP_IP4TOADDR(gw[0], gw[1], gw[2], gw[3]);
-    esp_netif_set_ip_info(s_shadow, &info);
-}
-
 bool toe_net_set_ipinfo(const uint8_t ip[4], const uint8_t sn[4],
     const uint8_t gw[4], const uint8_t dns[4]) {
     if (!s_net_up) {
@@ -139,7 +127,6 @@ bool toe_net_set_ipinfo(const uint8_t ip[4], const uint8_t sn[4],
     memcpy(info.dns, dns, 4);
     info.dhcp = NETINFO_STATIC;
     wizchip_setnetinfo(&info);
-    toe_net_sync_shadow(ip, sn, gw);
     return true;
 }
 
@@ -163,42 +150,20 @@ bool toe_net_bringup(const uint8_t mac[6], const toe_spi_port_config_t *wiring) 
     net_info_storage.dhcp = NETINFO_STATIC;
     const wiz_NetInfo *net_info = &net_info_storage;
 
-    // esp_netif_init() is idempotent in ESP-IDF (safe if network.LAN/WLAN
-    // already called it). The default event loop is already created
-    // unconditionally in main.c before the MicroPython task starts, so we
-    // must NOT create it again here -- a second esp_event_loop_create_default()
-    // call returns ESP_ERR_INVALID_STATE, which would abort under
-    // ESP_ERROR_CHECK.
+    // Bring lwIP up (tcpip_init and its socket VFS) if nothing has yet: the
+    // socket module's lwIP side must work whether or not network.LAN/WLAN
+    // were used first. esp_netif_init() is idempotent. The default event
+    // loop is created in main.c before the MicroPython task starts, so it
+    // must NOT be created again here (ESP_ERR_INVALID_STATE under
+    // ESP_ERROR_CHECK). No esp_netif is created for this interface: the
+    // chip owns the identity and ifconfig() reads it back from there, and a
+    // netif under the default Ethernet key would keep network.LAN from
+    // creating its own in the same session.
     esp_err_t err = esp_netif_init();
     if (err != ESP_OK) {
         printf("wiznettoe: esp_netif_init failed: %s\n", esp_err_to_name(err));
         return false;
     }
-
-    // Shadow netif: no driver, no data. Exists only so esp_netif's lwIP
-    // socket VFS fd-range gets registered, which the step-4 wrap layer
-    // needs for close()/fcntl() on TOE fds to route correctly.
-    // Created once; the chip config below re-runs on every call so that
-    // net_init() is a usable "start over from a clean chip" entry point.
-    if (!s_shadow) {
-        esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_ETH();
-        esp_netif_config_t netif_cfg = {
-            .base = &base,
-            .driver = NULL,
-            .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH,
-        };
-        s_shadow = esp_netif_new(&netif_cfg);
-        if (!s_shadow) {
-            printf("wiznettoe: esp_netif_new (shadow) failed\n");
-            return false;
-        }
-        esp_netif_dhcpc_stop(s_shadow);
-    }
-    esp_netif_ip_info_t ip = {0};
-    ip.ip.addr = ESP_IP4TOADDR(net_info->ip[0], net_info->ip[1], net_info->ip[2], net_info->ip[3]);
-    ip.netmask.addr = ESP_IP4TOADDR(net_info->sn[0], net_info->sn[1], net_info->sn[2], net_info->sn[3]);
-    ip.gw.addr = ESP_IP4TOADDR(net_info->gw[0], net_info->gw[1], net_info->gw[2], net_info->gw[3]);
-    esp_netif_set_ip_info(s_shadow, &ip);
 
     if (!toe_spi_port_init(wiring)) {
         return false;  // reason already printed by toe_spi_port_init
