@@ -98,7 +98,7 @@ static void toe_spi_read_burst(uint8_t *buf, uint16_t len) {
     }
 }
 
-static void toe_spi_write_burst(uint8_t *buf, uint16_t len) {
+static void toe_spi_write_burst(const uint8_t *buf, uint16_t len) {
     while (len > 0) {
         uint16_t n = len > TOE_SPI_TRANSACTION_MAX ? TOE_SPI_TRANSACTION_MAX : len;
         spi_transaction_t t = {

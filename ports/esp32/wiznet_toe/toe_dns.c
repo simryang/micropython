@@ -11,7 +11,7 @@
 #include "wiznet_toe.h"
 
 #include "toe_iolibrary.h"
-#include "wiznet_toe/Internet/DNS/dns.h"
+#include "dns.h"
 
 static uint8_t s_buf[MAX_DNS_BUF_SIZE];
 static esp_timer_handle_t s_tick;

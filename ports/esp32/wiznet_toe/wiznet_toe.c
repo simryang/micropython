@@ -8,12 +8,11 @@
  *   - time_us_32()  -> toe_time_us()     (esp_timer)
  *
  * This is the ONLY TU (besides ioLibrary itself) that talks to the ioLibrary
- * driver, whose socket()/listen()/connect()/send()/recv()/close() names clash
- * with POSIX/newlib. To avoid a duplicate/override of the POSIX `close`
- * symbol at link, this TU and the ioLibrary sources are compiled with
- * close=wiz_close (see esp32_common.cmake); the source below still reads with
- * the ioLibrary names. It includes NO FreeRTOS/POSIX headers, only
- * <string.h> + ioLibrary + toe_port.h.
+ * driver. ioLibrary is built with WIZCHIP_PREFIXED_EXPORTS (see
+ * esp32_common.cmake), so its socket API is reached as
+ * WIZCHIP_EXPORT(name)(...) -- wizchip_socket(), wizchip_close() and so on --
+ * and cannot collide with the POSIX names from newlib and lwIP. It includes
+ * NO FreeRTOS/POSIX headers, only <string.h> + ioLibrary + toe_port.h.
  *
  * Vendored verbatim from wsm_driver
  * (D:\esp32s3-lab\wsm_driver\port\ioLibrary_Driver\src\wiznet_toe.c).
@@ -64,7 +63,7 @@ static int toe_listener_open(int fd);   /* defined with wiztoe_listen() below */
 
 /* Open the hardware socket for a UDP fd. */
 static int toe_open_udp(int fd) {
-    if (socket((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd) {
+    if (WIZCHIP_EXPORT(socket)((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd) {
         return -1;
     }
 
@@ -212,7 +211,7 @@ int wiztoe_bind(int fd, uint16_t port) {
  * by accept()/poll() when the chip dropped a listener to SOCK_CLOSED, and by
  * wiztoe_listen_with(). */
 static int toe_listener_open(int fd) {
-    if (socket((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd) {
+    if (WIZCHIP_EXPORT(socket)((uint8_t)fd, Sn_MR_TCP, g_toe[fd].port, toe_open_flag(fd)) != fd) {
         return -1;
     }
     g_toe[fd].opened = 1;
@@ -221,7 +220,7 @@ static int toe_listener_open(int fd) {
      * after accept() serves the same port, not a fresh random one. */
     g_toe[fd].port = getSn_PORT((uint8_t)fd);
 
-    if (listen((uint8_t)fd) != SOCK_OK) {
+    if (WIZCHIP_EXPORT(listen)((uint8_t)fd) != SOCK_OK) {
         return -1;
     }
 
@@ -298,12 +297,12 @@ int wiztoe_connect(int fd, const uint8_t ip[4], uint16_t port) {
         lport = (uint16_t)(0xC000u + (toe_time_us() % 0x3FF0u));
         g_toe[fd].port = lport;
     }
-    if (socket((uint8_t)fd, Sn_MR_TCP, lport, toe_open_flag(fd)) != fd) {
+    if (WIZCHIP_EXPORT(socket)((uint8_t)fd, Sn_MR_TCP, lport, toe_open_flag(fd)) != fd) {
         return -1;
     }
     g_toe[fd].opened = 1;
 
-    return (connect((uint8_t)fd, (uint8_t *)ip, port) == SOCK_OK) ? 0 : -1;
+    return (WIZCHIP_EXPORT(connect)((uint8_t)fd, (uint8_t *)ip, port) == SOCK_OK) ? 0 : -1;
 }
 
 int wiztoe_send(int fd, const void *buf, size_t len) {
@@ -349,7 +348,7 @@ int wiztoe_send(int fd, const void *buf, size_t len) {
 
     for (;;)
     {
-        int32_t n = send((uint8_t)fd, (uint8_t *)buf, (uint16_t)len);
+        int32_t n = WIZCHIP_EXPORT(send)((uint8_t)fd, (uint8_t *)buf, (uint16_t)len);
         if (n != SOCK_BUSY) {
             return (n < 0) ? -1 : (int)n;
         }
@@ -407,7 +406,7 @@ int wiztoe_recv(int fd, void *buf, size_t len) {
         toe_yield_1ms();
     }
 
-    int32_t n = recv((uint8_t)fd, (uint8_t *)buf, (uint16_t)len);
+    int32_t n = WIZCHIP_EXPORT(recv)((uint8_t)fd, (uint8_t *)buf, (uint16_t)len);
     if (n == SOCKERR_SOCKSTATUS || n == SOCKERR_SOCKCLOSED) {
         return 0;                              /* EOF */
     }
@@ -424,13 +423,13 @@ int wiztoe_sendto(int fd, const void *buf, size_t len,
     }
 
     if (!g_toe[fd].opened) {
-        if (socket((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd) {
+        if (WIZCHIP_EXPORT(socket)((uint8_t)fd, Sn_MR_UDP, g_toe[fd].port, 0) != fd) {
             return -1;
         }
         g_toe[fd].opened = 1;
     }
 
-    int32_t n = sendto((uint8_t)fd, (uint8_t *)buf, (uint16_t)len,
+    int32_t n = WIZCHIP_EXPORT(sendto)((uint8_t)fd, (uint8_t *)buf, (uint16_t)len,
         (uint8_t *)ip, port);
     return (n < 0) ? -1 : (int)n;
 }
@@ -467,7 +466,7 @@ int wiztoe_recvfrom(int fd, void *buf, size_t len, uint8_t ip[4], uint16_t *port
         toe_yield_1ms();
     }
 
-    int32_t n = recvfrom((uint8_t)fd, (uint8_t *)buf, (uint16_t)len, ip, port);
+    int32_t n = WIZCHIP_EXPORT(recvfrom)((uint8_t)fd, (uint8_t *)buf, (uint16_t)len, ip, port);
     return (n < 0) ? -1 : (int)n;
 }
 
@@ -528,7 +527,7 @@ int wiztoe_socket_reserve(void) {
 
 void wiztoe_socket_release(int sn) {
     if (sn >= 0 && sn < WIZTOE_MAX_SOCK) {
-        close((uint8_t)sn);
+        WIZCHIP_EXPORT(close)((uint8_t)sn);
         memset(&g_toe[sn], 0, sizeof(g_toe[sn]));
     }
 }
@@ -579,7 +578,7 @@ static void toe_tcp_disconnect_if_connected(int fd) {
         toe_yield_1ms();
     }
 
-    close((uint8_t)fd);           /* abortive: the graceful path did not finish */
+    WIZCHIP_EXPORT(close)((uint8_t)fd); /* abortive: the graceful path did not finish */
 }
 
 int wiztoe_close(int fd) {
@@ -591,7 +590,7 @@ int wiztoe_close(int fd) {
         toe_tcp_disconnect_if_connected(fd);
     }
     if (g_toe[fd].opened) {
-        close((uint8_t)fd);
+        WIZCHIP_EXPORT(close)((uint8_t)fd);
     }
     memset(&g_toe[fd], 0, sizeof(g_toe[fd]));
     return 0;

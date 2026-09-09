@@ -153,12 +153,6 @@ list(APPEND MICROPY_SOURCE_PORT
 )
 if(MICROPY_PY_NETWORK_WIZNET_TOE)
     list(APPEND MICROPY_SOURCE_PORT
-        # Vendored ioLibrary_Driver: W5500 register access and hardware sockets.
-        wiznet_toe/Ethernet/socket.c
-        wiznet_toe/Ethernet/wizchip_conf.c
-        wiznet_toe/Ethernet/W5500/w5500.c
-        wiznet_toe/Internet/DHCP/dhcp.c
-        wiznet_toe/Internet/DNS/dns.c
         # Port layer: SPI bring-up, network identity, VFS descriptors, DHCP,
         # DNS, the socket backend and the network.WIZNET_TOE interface object.
         wiznet_toe/toe_spi_port.c
@@ -171,6 +165,20 @@ if(MICROPY_PY_NETWORK_WIZNET_TOE)
         wiznet_toe/toe_dns.c
         wiznet_toe/network_wiznet_toe.c
     )
+    # ioLibrary_Driver (W5500 register access, hardware sockets, DHCP and DNS
+    # clients) comes from the lib/wiznet5k submodule that extmod's
+    # network_wiznet5k.c builds against on the other ports.
+    list(APPEND MICROPY_SOURCE_LIB
+        ${MICROPY_DIR}/lib/wiznet5k/Ethernet/socket.c
+        ${MICROPY_DIR}/lib/wiznet5k/Ethernet/wizchip_conf.c
+        ${MICROPY_DIR}/lib/wiznet5k/Ethernet/W5500/w5500.c
+        ${MICROPY_DIR}/lib/wiznet5k/Internet/DHCP/dhcp.c
+        ${MICROPY_DIR}/lib/wiznet5k/Internet/DNS/dns.c
+    )
+    list(APPEND GIT_SUBMODULES lib/wiznet5k)
+    if(NOT UPDATE_SUBMODULES AND NOT EXISTS ${MICROPY_DIR}/lib/wiznet5k/README.md)
+        message(FATAL_ERROR " lib/wiznet5k not initialized.\n Run 'make BOARD=${MICROPY_BOARD} submodules'")
+    endif()
 endif()
 list(TRANSFORM MICROPY_SOURCE_PORT PREPEND ${MICROPY_PORT_DIR}/)
 list(APPEND MICROPY_SOURCE_PORT ${CMAKE_BINARY_DIR}/pins.c)
@@ -316,44 +324,19 @@ target_include_directories(${MICROPY_TARGET} PUBLIC
 
 if(MICROPY_PY_NETWORK_WIZNET_TOE)
     # ioLibrary headers include each other by bare name, so their directories
-    # go on the include path; _WIZCHIP_ selects the W5500 code in wizchip_conf.h.
+    # go on the include path.  _WIZCHIP_ selects the W5500 code in
+    # wizchip_conf.h; WIZCHIP_PREFIXED_EXPORTS gives ioLibrary's socket API a
+    # wizchip_ prefix (as extmod does) so that its close() and friends cannot
+    # collide with the POSIX names from newlib and lwIP.
     target_include_directories(${MICROPY_TARGET} PUBLIC
-        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet
-        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP
-        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS
+        ${MICROPY_DIR}/lib/wiznet5k/Ethernet
+        ${MICROPY_DIR}/lib/wiznet5k/Internet/DHCP
+        ${MICROPY_DIR}/lib/wiznet5k/Internet/DNS
     )
     target_compile_definitions(${MICROPY_TARGET} PUBLIC
         MICROPY_PY_NETWORK_WIZNET_TOE=1
         _WIZCHIP_=5500
-    )
-    # ioLibrary's socket.c defines a global close(uint8_t) that would hijack
-    # newlib's POSIX close().  Rename it to wiz_close in every translation unit
-    # that uses ioLibrary's socket API, so ioLibrary stays consistent with
-    # itself and POSIX close() is left alone.
-    set_source_files_properties(
-        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/socket.c
-        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/wizchip_conf.c
-        ${MICROPY_PORT_DIR}/wiznet_toe/Ethernet/W5500/w5500.c
-        ${MICROPY_PORT_DIR}/wiznet_toe/wiznet_toe.c
-        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dhcp.c
-        ${MICROPY_PORT_DIR}/wiznet_toe/toe_dns.c
-        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
-    )
-    # Two artefacts of the vendored ioLibrary, which is not edited here:
-    # its socket.h declares IPv6 helpers static without defining them, so
-    # every includer but socket.c gets an unused-function warning per helper;
-    # and the DHCP/DNS clients keep an address-length variable for the newer
-    # recvfrom(), which on the W5500 is macro'd away, leaving it unused.
-    # Silence exactly those and let anything else through.
-    set_source_files_properties(
-        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DHCP/dhcp.c
-        ${MICROPY_PORT_DIR}/wiznet_toe/Internet/DNS/dns.c
-        PROPERTIES COMPILE_DEFINITIONS "close=wiz_close"
-        COMPILE_OPTIONS "-Wno-unused-function;-Wno-unused-variable"
-    )
-    set_source_files_properties(
-        ${MICROPY_PORT_DIR}/wiznet_toe/wiznet_toe.c
-        PROPERTIES COMPILE_OPTIONS "-Wno-unused-function"
+        WIZCHIP_PREFIXED_EXPORTS=1
     )
 endif()
 

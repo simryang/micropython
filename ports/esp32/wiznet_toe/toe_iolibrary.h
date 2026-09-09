@@ -1,4 +1,4 @@
-// The port's one way into ioLibrary_Driver's headers.
+// The port's one way into ioLibrary_Driver's headers (lib/wiznet5k).
 //
 // ioLibrary's W5500 register map defines MR (the chip's mode register) and
 // SOCK_STREAM/SOCK_DGRAM (its socket types).  Those names are also the Xtensa
