@@ -220,10 +220,7 @@ static bool toe_wiring_equal(const toe_spi_port_config_t *a, const toe_spi_port_
 }
 
 bool toe_spi_port_init(const toe_spi_port_config_t *wiring) {
-    if (s_initted) {
-        if (toe_wiring_equal(&s_wiring, wiring)) {
-            return true;
-        }
+    if (s_initted && !toe_wiring_equal(&s_wiring, wiring)) {
         // Rewired while the interface was down: give the old bus and pins
         // back before taking the new ones.
         spi_bus_remove_device(s_spi_dev);
@@ -233,6 +230,13 @@ bool toe_spi_port_init(const toe_spi_port_config_t *wiring) {
     }
     s_wiring = *wiring;
 
+    // Claim the CS and reset pins on every bring-up, not only the first one:
+    // another driver may have taken them while this interface was down.
+    // network.LAN (esp_eth) adds its own SPI device with a hardware CS on the
+    // same GPIO, which routes the pad to the SPI peripheral's CS signal, and
+    // from then on the software CS used here (gpio_set_level) does not reach
+    // the pad until gpio_config() routes it back to the GPIO output register.
+    // Seen as TOE -> LAN -> TOE failing with "unexpected VERSIONR".
     gpio_config_t cs_rst_conf = {
         .pin_bit_mask = (1ULL << s_wiring.cs_pin) | (1ULL << s_wiring.reset_pin),
         .mode = GPIO_MODE_OUTPUT,
@@ -243,6 +247,10 @@ bool toe_spi_port_init(const toe_spi_port_config_t *wiring) {
     gpio_config(&cs_rst_conf);
     gpio_set_level(s_wiring.cs_pin, 1);
     gpio_set_level(s_wiring.reset_pin, 1);
+
+    if (s_initted) {
+        return true;  // the SPI device and ioLibrary callbacks are still in place
+    }
 
     if (!toe_spi_add_device(s_clock_hz)) {
         return false;
